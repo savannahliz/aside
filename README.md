@@ -10,18 +10,18 @@
 
 你正在处理一件事，另一个想法却突然冒出来。切走去记录，会打断当前任务；不记，又怕它转瞬即逝。Aside 把记录动作缩短为：**按快捷键 → 写一句 → 回到手头的事。**
 
-它是一个轻量桌面 Inbox，不是多窗口便签墙。所有想法进入同一个列表，新记录默认不置顶；只有你选出的最多三条事项会持续留在眼前。记录保存在本机，无需账号、云同步或 AI 服务。
+它是一个轻量桌面 Inbox，不是多窗口便签墙。所有想法进入同一个列表，新记录默认不置顶；只有你选出的置顶事项会持续留在眼前，置顶数量可在设置中调整。记录保存在本机，无需账号、云同步或 AI 服务。
 
 ## 快速上手
 
-1. 从 [v1.1.0 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.0) 下载适合你系统的安装包。源码压缩包不能直接运行。
+1. 从 [v1.1.1 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.1) 下载适合你系统的安装包。源码压缩包不能直接运行。
 2. 启动 Aside。在任何应用中按快速记录快捷键，屏幕中央会出现输入条。
 3. 输入内容并按 **Enter**：输入条消失，内容进入 Inbox；按 **Esc** 可取消。快捷键和保存键均可在设置中修改。
 
 | 平台 | 下载 | 默认快速记录快捷键 |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.0/Aside-1.1.0-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.0/Aside-1.1.0-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-Windows-x64.exe) | Ctrl + Alt + Space |
 
 Mac：打开 DMG，把 `Aside.app` 拖进“应用程序”；它常驻顶部菜单栏，不显示在 Dock。Windows：双击 `Aside.exe`，无需另装 .NET；应用可从系统托盘找到。
 
@@ -30,8 +30,8 @@ Mac：打开 DMG，把 `Aside.app` 拖进“应用程序”；它常驻顶部菜
 ## 闪念先放一边，重要的事留在眼前
 
 - **快速捕获**：中央输入条随叫随到，写完即消失。鼠标移入时才显示取消按钮；新事项默认进入普通 Inbox。
-- **一个 Inbox，最多三条 Pin**：展开时看全部内容，收起时只看 Pin。置顶第四条时可选择替换对象，原事项仍留在 Inbox。
-- **不占满桌面**：完整列表、三条 Pin 和单行细条三种形态；窗口可拖动、缩放、置顶，也可贴到屏幕左右边缘隐藏，靠近边条再唤回。
+- **一个 Inbox，自定义 Pin 数量**：展开时看全部内容，收起时只看 Pin；点击事项可在原位置直接修改。置顶已满时可选择替换对象，原事项仍留在 Inbox。
+- **不占满桌面**：完整列表、置顶事项和单行细条三种形态；窗口可拖动、缩放、置顶，也可贴到屏幕左右边缘隐藏，靠近边条再唤回。
 - **让界面安静下来**：使用系统调色盘选背景色、保存常用颜色，分别调整便签闲置、交互和快速输入时的透明度。
 - **事后整理**：完成事项可恢复；“清空”仅删除已完成事项，首次会确认，也可选择以后不再提示。
 

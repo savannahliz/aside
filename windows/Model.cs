@@ -41,6 +41,9 @@ public sealed class Preferences
     public double CaptureOpacity { get; set; } = .95;
     public List<string> SavedColors { get; set; } = new();
     public bool SkipClearCompletedConfirmation { get; set; }
+    public int PinLimit { get; set; } = 3;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int PinCapacity => Math.Clamp(PinLimit, 1, 20);
 }
 
 public sealed class Notebook
@@ -73,7 +76,7 @@ public sealed class Notebook
         }
         else
         {
-            if (Pins.Length >= 3) return false;
+            if (Pins.Length >= Preferences.PinCapacity) return false;
             rank = Pins.Length;
         }
         item.Pinned = true;
@@ -83,6 +86,13 @@ public sealed class Notebook
     }
 
     public void Unpin(Guid id) { var i = Items.Find(i => i.Id == id); if (i != null) i.Pinned = false; Normalize(); }
+    public bool Edit(Guid id, string content)
+    {
+        var item = Items.Find(i => i.Id == id);
+        if (item == null || string.IsNullOrWhiteSpace(content)) return false;
+        item.Content = content.Trim();
+        return true;
+    }
     public void Complete(Guid id)
     {
         var i = Items.Find(i => i.Id == id);
@@ -110,7 +120,7 @@ public sealed class Notebook
     public void Validate()
     {
         if (Items == null || Preferences == null || Items.Any(i => i == null || i.Content == null) ||
-            Items.Select(i => i.Id).Distinct().Count() != Items.Count || Pins.Length > 3 || Items.Any(i => i.Completed && i.Pinned))
+            Items.Select(i => i.Id).Distinct().Count() != Items.Count || Pins.Length > 20 || Items.Any(i => i.Completed && i.Pinned))
             throw new InvalidDataException("记录文件格式不正确");
         Normalize();
     }

@@ -15,13 +15,22 @@ struct PaletteChecks {
         json.removeValue(forKey: "savedColors")
         defaults.set(try JSONSerialization.data(withJSONObject: json), forKey: "preferences")
         let store = Store(directory: directory, defaults: defaults)
+        precondition(store.preferences.pinCapacity == 3)
         precondition(store.preferences.skipClearCompletedConfirmation != true)
         precondition(store.add("done", pinned: false))
         precondition(store.add("keep pinned", pinned: true))
+        let pinID = store.notebook.pins[0].id
+        precondition(store.edit(pinID, content: "  edited pin  "))
+        precondition(store.notebook.pins[0].content == "edited pin")
+        store.preferences.pinLimit = 1
+        precondition(!store.add("one too many", pinned: true))
+        store.preferences.pinLimit = 4
+        precondition(store.add("second pin", pinned: true))
+        precondition(Store(directory: directory, defaults: defaults).preferences.pinCapacity == 4)
         store.complete(store.notebook.inbox[0].id)
         store.clearCompleted()
         let notesAfterClear = Store(directory: directory, defaults: defaults).notebook
-        precondition(notesAfterClear.done.isEmpty && notesAfterClear.pins.count == 1 && notesAfterClear.items.count == 1)
+        precondition(notesAfterClear.done.isEmpty && notesAfterClear.pins.count == 2 && notesAfterClear.items.count == 2)
         precondition(store.preferences.skipClearCompletedConfirmation != true)
         precondition(store.add("done without future confirmation", pinned: false))
         store.complete(store.notebook.inbox[0].id)

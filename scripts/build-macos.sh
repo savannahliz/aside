@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+build_label="${ASIDE_BUILD_LABEL:-1.1.1}"
 mkdir -p .build/arm64 .build/x86_64 dist/Aside.app/Contents/MacOS dist/Aside.app/Contents/Resources
 sdk="${SDKROOT:-$(xcrun --show-sdk-path)}"
 for arch in arm64 x86_64; do
@@ -24,5 +25,5 @@ stage="$(mktemp -d "${TMPDIR:-/tmp}/aside-dmg.XXXXXX")"
 ditto dist/Aside.app "$stage/Aside.app"
 ln -s /Applications "$stage/Applications"
 cp packaging/安装说明.txt "$stage/安装说明.txt"
-hdiutil create -volname Aside -srcfolder "$stage" -ov -format UDZO dist/Aside-1.1.0-macOS-universal.dmg
-printf 'Built: %s/dist/Aside.app\nBuilt: %s/dist/Aside-1.1.0-macOS-universal.dmg\n' "$PWD" "$PWD"
+hdiutil create -volname Aside -srcfolder "$stage" -ov -format UDZO "dist/Aside-${build_label}-macOS-universal.dmg"
+printf 'Built: %s/dist/Aside.app\nBuilt: %s/dist/Aside-%s-macOS-universal.dmg\n' "$PWD" "$PWD" "$build_label"

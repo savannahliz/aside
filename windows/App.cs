@@ -71,7 +71,7 @@ public sealed class App : Application
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("显示 Inbox", null, (_, _) => Dispatcher.Invoke(ShowInbox));
         menu.Items.Add("快速记录", null, (_, _) => Dispatcher.Invoke(ToggleCapture));
-        var pinsMenu = menu.Items.Add("仅显示三条 Pin", null, (_, _) => Dispatcher.Invoke(() => { Inbox.Show(); Inbox.ChangeMode(true, false); }));
+        var pinsMenu = menu.Items.Add("仅显示置顶事项", null, (_, _) => Dispatcher.Invoke(() => { Inbox.Show(); Inbox.ChangeMode(true, false); }));
         var stripMenu = menu.Items.Add("收为细条", null, (_, _) => Dispatcher.Invoke(() => { Inbox.Show(); Inbox.ChangeMode(true, true); }));
         menu.Items.Add("隐藏窗口", null, (_, _) => Dispatcher.Invoke(Inbox.HideToTray));
         var topMenu = new Forms.ToolStripMenuItem("窗口置顶");
@@ -140,7 +140,7 @@ public sealed class App : Application
     }
     internal Guid? ChooseReplacement(Window owner)
     {
-        var dialog = UI.Dialog("三条 Pin 已满", 350, 300, owner);
+        var dialog = UI.Dialog($"{Store.Book.Preferences.PinCapacity} 条 Pin 已满", 350, 300, owner);
         var stack = new StackPanel { Margin = new Thickness(22) };
         stack.Children.Add(UI.Text("选择一条替换", 18));
         stack.Children.Add(UI.Text("原事项会留在 Inbox。", 12));
@@ -156,7 +156,7 @@ public sealed class App : Application
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         Guid? replacement = null;
-        if (pin && Store.Book.Pins.Length == 3)
+        if (pin && Store.Book.Pins.Length >= Store.Book.Preferences.PinCapacity)
         {
             replacement = ChooseReplacement(owner);
             if (!replacement.HasValue) return false;
@@ -215,7 +215,7 @@ internal sealed class MainWindow : Window
     private bool resizingMode;
     private bool showDone;
     private StackPanel? compactControls;
-    private readonly DispatcherTimer edgeTimer = new() { Interval = TimeSpan.FromMilliseconds(100) };
+    private readonly DispatcherTimer edgeTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private readonly Window edgeHandle = new()
     {
         Title = "Aside 边缘唤回条", Width = 8, Height = 100,
@@ -225,6 +225,8 @@ internal sealed class MainWindow : Window
     private Rect? dockFrame;
     private bool dockHidden;
     private bool edgeTransitioning;
+    private bool editingItem;
+    private Action? finishInlineEdit;
     private int edgeMotionToken;
     private bool userDragging;
 
@@ -242,7 +244,7 @@ internal sealed class MainWindow : Window
         Content = surface;
         input.KeyDown += (_, e) => { if (e.Key == Key.Enter) { SaveInput(); e.Handled = true; } };
         MouseEnter += (_, _) => { if (compactControls != null) compactControls.Opacity = 1; Fade(); };
-        MouseLeave += (_, _) => { if (compactControls != null) compactControls.Opacity = 0; Fade(); };
+        MouseLeave += (_, _) => { finishInlineEdit?.Invoke(); if (compactControls != null) compactControls.Opacity = 0; Fade(); };
         Activated += (_, _) => Fade(); Deactivated += (_, _) => Fade();
         LocationChanged += (_, _) => { if (!resizingMode && Mouse.LeftButton == MouseButtonState.Pressed) userDragging = true; ScheduleFrame(); };
         SizeChanged += (_, _) => ScheduleFrame();
@@ -295,7 +297,7 @@ internal sealed class MainWindow : Window
         controls.Children.Add(UI.Button(p.Collapsed ? "━" : "↙", ToggleMode));
         if (p.Collapsed) controls.Children.Add(UI.Button("↗", Expand));
         DockPanel.SetDock(controls, Dock.Right); header.Children.Add(controls);
-        if (!p.Collapsed) header.Children.Add(UI.Text($"Inbox  ·  {app.Store.Book.Pins.Length}/3", 17));
+        if (!p.Collapsed) header.Children.Add(UI.Text($"Inbox  ·  {app.Store.Book.Pins.Length}/{p.PinCapacity}", 17));
         compactControls = p.Collapsed ? controls : null;
         if (compactControls != null) compactControls.Opacity = IsMouseOver ? 1 : 0;
         header.MouseLeftButtonDown += (_, e) => { if (e.Source == header || e.Source is TextBlock) DragWindow(); };
@@ -319,7 +321,7 @@ internal sealed class MainWindow : Window
             if (app.Store.Book.Pins.Length > 0 && normal.Length > 0) rows.Children.Add(new Separator { Margin = new Thickness(5, 8, 5, 8) });
             foreach (var item in normal) rows.Children.Add(Row(item));
             if (normal.Length + app.Store.Book.Pins.Length == 0)
-                rows.Children.Add(UI.Text("想到就记，记完就走。\n\n随手记入 Inbox，把最想看见的三件事 Pin 在这里。", 14));
+                rows.Children.Add(UI.Text("想到就记，记完就走。\n\n随手记入 Inbox，把最想看见的事项 Pin 在这里。", 14));
             var done = app.Store.Book.Items.Where(i => i.Completed).ToArray();
             if (done.Length > 0)
             {
@@ -376,14 +378,18 @@ internal sealed class MainWindow : Window
                 if (item.Pinned) app.Commit(b => b.Unpin(item.Id));
                 else
                 {
-                    var replacement = app.Store.Book.Pins.Length == 3 ? app.ChooseReplacement(this) : null;
-                    if (app.Store.Book.Pins.Length < 3 || replacement.HasValue) app.Commit(b => b.Pin(item.Id, replacement));
+                    var replacement = app.Store.Book.Pins.Length >= app.Store.Book.Preferences.PinCapacity ? app.ChooseReplacement(this) : null;
+                    if (app.Store.Book.Pins.Length < app.Store.Book.Preferences.PinCapacity || replacement.HasValue) app.Commit(b => b.Pin(item.Id, replacement));
                 }
             });
             pin.ToolTip = item.Pinned ? "取消置顶" : "置顶";
             DockPanel.SetDock(pin, Dock.Right); row.Children.Add(pin);
         }
         var text = UI.Text(item.Content); text.VerticalAlignment = VerticalAlignment.Center;
+        text.Cursor = Cursors.Hand;
+        text.ToolTip = "点击修改事项";
+        var dragging = false;
+        text.MouseLeftButtonUp += (_, e) => { if (e.ChangedButton == MouseButton.Left && !dragging) StartInlineEdit(item, row, text); };
         if (item.Completed) { text.TextDecorations = TextDecorations.Strikethrough; text.Opacity = .55; }
         row.Children.Add(text);
         var context = new ContextMenu();
@@ -392,18 +398,49 @@ internal sealed class MainWindow : Window
         if (item.Pinned)
         {
             Point start = default;
-            text.PreviewMouseLeftButtonDown += (_, e) => start = e.GetPosition(text);
+            text.PreviewMouseLeftButtonDown += (_, e) => { start = e.GetPosition(text); dragging = false; };
             text.MouseMove += (_, e) =>
             {
                 var point = e.GetPosition(text);
                 if (e.LeftButton == MouseButtonState.Pressed && (Math.Abs(point.X - start.X) > 5 || Math.Abs(point.Y - start.Y) > 5))
+                {
+                    dragging = true;
                     DragDrop.DoDragDrop(text, new DataObject("QuietPin.Item", item.Id.ToString()), DragDropEffects.Move);
+                }
             };
             row.AllowDrop = true;
             row.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent("QuietPin.Item") ? DragDropEffects.Move : DragDropEffects.None; e.Handled = true; };
             row.Drop += (_, e) => { if (Guid.TryParse(e.Data.GetData("QuietPin.Item") as string, out var id)) app.Commit(b => b.Move(id, item.Id)); };
         }
         return row;
+    }
+
+    private void StartInlineEdit(Item item, DockPanel row, TextBlock label)
+    {
+        if (editingItem) return;
+        editingItem = true;
+        var editor = new TextBox { Text = item.Content, FontSize = 13, BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent, Foreground = Foreground, Padding = new Thickness(0, 3, 0, 0) };
+        row.Children.Remove(label);
+        row.Children.Add(editor);
+        var finished = false;
+        void Finish(bool save)
+        {
+            if (finished) return;
+            finished = true;
+            editingItem = false;
+            finishInlineEdit = null;
+            if (save && !string.IsNullOrWhiteSpace(editor.Text) && editor.Text.Trim() != item.Content)
+                app.Commit(b => b.Edit(item.Id, editor.Text));
+            else Render();
+        }
+        editor.KeyDown += (_, e) => {
+            if (e.Key == Key.Enter) { Finish(true); e.Handled = true; }
+            else if (e.Key == Key.Escape) { Finish(false); e.Handled = true; }
+        };
+        editor.LostKeyboardFocus += (_, _) => Finish(true);
+        finishInlineEdit = () => Finish(true);
+        editor.Focus(); editor.SelectAll();
     }
 
     private void SaveInput()
@@ -495,7 +532,7 @@ internal sealed class MainWindow : Window
     }
     private void PollEdge()
     {
-        if (edgeTransitioning) return;
+        if (edgeTransitioning && dockHidden) return;
         var pressing = Native.GetAsyncKeyState(0x01) < 0;
         if (userDragging && !pressing)
         {
@@ -514,9 +551,11 @@ internal sealed class MainWindow : Window
             Fade(); SaveFrame();
         }
         var visibleWindow = dockHidden ? edgeHandle : this;
-        if (pressing || userDragging || !visibleWindow.IsVisible || !IsEnabled || app.Store.Book.Preferences.DockEdge == null || !dockFrame.HasValue) return;
+        if (pressing || userDragging || editingItem || !visibleWindow.IsVisible || !IsEnabled || app.Store.Book.Preferences.DockEdge == null || !dockFrame.HasValue) return;
         Native.GetCursorPos(out var cursor);
         var local = visibleWindow.PointFromScreen(new Point(cursor.X, cursor.Y));
+        if (edgeTransitioning && !dockHidden && dockFrame.HasValue)
+            local = new Point(local.X + Left - dockFrame.Value.Left, local.Y + Top - dockFrame.Value.Top);
         if (new Rect(-3, -3, visibleWindow.ActualWidth + 6, visibleWindow.ActualHeight + 6).Contains(local))
         { RevealFromEdge(); }
         else
@@ -528,7 +567,10 @@ internal sealed class MainWindow : Window
     {
         if (dockHidden || !dockFrame.HasValue) return;
         var rest = dockFrame.Value; var work = WorkArea();
-        resizingMode = true; frameTimer.Stop(); dockFrame = new Rect(Left, Top, Width, Height); dockHidden = true;
+        var currentLeft = Left;
+        BeginAnimation(LeftProperty, null);
+        Left = currentLeft;
+        resizingMode = true; frameTimer.Stop(); dockFrame = rest; dockHidden = true;
         edgeTransitioning = true; var token = ++edgeMotionToken;
         // Swap windows instead of resizing the live transparent content to 8px.
         edgeHandle.Height = Math.Min(100, rest.Height);
@@ -543,8 +585,8 @@ internal sealed class MainWindow : Window
         }
         if (!animated || !SystemParameters.ClientAreaAnimation) { Finish(); return; }
         var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width + 8 : work.Right - 8;
-        var slide = new DoubleAnimation(Left, parked, TimeSpan.FromMilliseconds(190)) {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut }
+        var slide = new DoubleAnimation(Left, parked, TimeSpan.FromMilliseconds(120)) {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };
         slide.Completed += (_, _) => Finish();
         BeginAnimation(LeftProperty, slide);
@@ -730,6 +772,12 @@ internal sealed class SettingsWindow : Window
         stack.Children.Clear(); var p = app.Store.Book.Preferences;
         stack.Children.Add(UI.Text("通用", 18));
         Toggle("窗口始终置顶", p.Topmost, value => app.Commit(b => b.Preferences.Topmost = value));
+        var pinCount = new DockPanel { Margin = new Thickness(3, 7, 3, 7) };
+        var count = new ComboBox { ItemsSource = Enumerable.Range(1, 20).ToArray(), SelectedItem = p.PinCapacity, Width = 65 };
+        count.SelectionChanged += (_, _) => app.Commit(b => b.Preferences.PinLimit = (int)count.SelectedItem);
+        DockPanel.SetDock(count, Dock.Right); pinCount.Children.Add(count);
+        pinCount.Children.Add(UI.Text("最多置顶条数")); stack.Children.Add(pinCount);
+        stack.Children.Add(UI.Text("调低数量不会移除已有置顶；可手动取消多余置顶。", 11));
         using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             Toggle("登录时启动 Aside", key?.GetValue("QuietPin") != null, SetLogin);
         stack.Children.Add(UI.Text("全局快捷键"));

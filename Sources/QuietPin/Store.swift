@@ -45,6 +45,8 @@ struct Preferences: Codable {
     var captureOpacity: Double?
     var savedColors: [BackgroundColor]?
     var skipClearCompletedConfirmation: Bool?
+    var pinLimit: Int?
+    var pinCapacity: Int { max(1, min(20, pinLimit ?? 3)) }
 }
 
 @MainActor
@@ -100,7 +102,7 @@ final class Store: ObservableObject {
     @discardableResult
     func add(_ content: String, pinned: Bool, replacing: UUID? = nil) -> Bool {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        if pinned && notebook.pins.count >= 3 && replacing == nil { return false }
+        if pinned && notebook.pins.count >= preferences.pinCapacity && replacing == nil { return false }
         if let replacing, !notebook.pins.contains(where: { $0.id == replacing }) {
             errorMessage = "要替换的 Pin 已改变，请重新选择。"
             return false
@@ -108,7 +110,7 @@ final class Store: ObservableObject {
         var valid = true
         let saved = update { book in
             guard let id = book.add(content) else { valid = false; return }
-            if pinned, book.pin(id, replacing: replacing) != .applied { valid = false }
+            if pinned, book.pin(id, replacing: replacing, limit: preferences.pinCapacity) != .applied { valid = false }
         }
         return saved && valid
     }
@@ -116,10 +118,10 @@ final class Store: ObservableObject {
     func requestPin(_ id: UUID) {
         if notebook.pins.contains(where: { $0.id == id }) {
             _ = update { $0.unpin(id) }
-        } else if notebook.pins.count == 3 {
+        } else if notebook.pins.count >= preferences.pinCapacity {
             pendingPin = id
         } else {
-            _ = update { _ = $0.pin(id) }
+            _ = update { _ = $0.pin(id, limit: preferences.pinCapacity) }
         }
     }
 
@@ -129,6 +131,11 @@ final class Store: ObservableObject {
     }
 
     func complete(_ id: UUID) { _ = update { $0.toggleCompleted(id) } }
+    func edit(_ id: UUID, content: String) -> Bool {
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              notebook.items.contains(where: { $0.id == id }) else { return false }
+        return update { _ = $0.edit(id, content: content) }
+    }
     func delete(_ id: UUID) { _ = update { $0.delete(id) } }
     func clearCompleted(skipFutureConfirmation: Bool = false) {
         if update({ $0.clearCompleted() }), skipFutureConfirmation {

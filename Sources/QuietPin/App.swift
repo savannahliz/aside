@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var dockFrame: NSRect?
     private var dockHidden = false
     private var edgeTransitioning = false
+    private var editingItem = false
     private var edgeMotionToken = 0
     private var edgeMotionTimer: Timer?
     private var dockTimer: Timer?
@@ -89,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         applyPreferences()
         mainPanel.orderFrontRegardless()
         if store.preferences.dockEdge != nil { dockFrame = mainPanel.frame; hideAtEdge(animated: false) }
-        dockTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { [weak self] _ in
+        dockTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pollEdge() }
         }
         if smoke { DispatchQueue.main.async { self.runSmokeTest() } }
@@ -131,7 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             expand: { [weak self] in self?.showInbox() },
             openSettings: { [weak self] in self?.showSettings() },
             minimize: { [weak self] in self?.hideInbox() },
-            hoverChanged: { [weak self] inside in self?.hovering = inside; self?.updateOpacity() }))
+            hoverChanged: { [weak self] inside in self?.hovering = inside; self?.updateOpacity() },
+            editingChanged: { [weak self] editing in self?.editingItem = editing }))
         let saved = currentSavedFrame
         if let saved { mainPanel.setFrame(onScreen(NSRectFromString(saved)), display: false) }
         else if store.preferences.collapsed {
@@ -164,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let entries: [(String, Selector, String)] = [
             ("显示 Inbox", #selector(showInbox), ""),
             ("快速记录", #selector(toggleCapture), ""),
-            ("仅显示三条 Pin", #selector(showPins), ""),
+            ("仅显示置顶事项", #selector(showPins), ""),
             ("收为细条", #selector(showStrip), ""),
             ("最小化到菜单栏", #selector(hideInbox), ""),
             ("窗口置顶", #selector(toggleAlwaysOnTop), ""),
@@ -434,7 +436,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func pollEdge(pointer: NSPoint? = nil) {
-        guard !edgeTransitioning else { return }
+        guard !edgeTransitioning || !dockHidden else { return }
         let pressing = NSEvent.pressedMouseButtons & 1 == 1
         if userDragging && !pressing {
             userDragging = false
@@ -462,8 +464,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let visiblePanel: NSWindow = dockHidden ? edgePanel : mainPanel
         guard !pressing, !userDragging, visiblePanel.isVisible,
               store.preferences.dockEdge != nil, dockFrame != nil,
-              mainPanel.attachedSheet == nil else { return }
-        let hit = visiblePanel.frame.insetBy(dx: -3, dy: -3).contains(pointer ?? NSEvent.mouseLocation)
+              mainPanel.attachedSheet == nil, !editingItem else { return }
+        let hoverFrame = edgeTransitioning && !dockHidden ? (dockFrame ?? visiblePanel.frame) : visiblePanel.frame
+        let hit = hoverFrame.insetBy(dx: -3, dy: -3).contains(pointer ?? NSEvent.mouseLocation)
         if hit {
             revealFromEdge()
         } else {
@@ -477,7 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             ?? NSScreen.main!.visibleFrame
         changingMode = true
         saveFrameWork?.cancel()
-        dockFrame = mainPanel.frame
+        dockFrame = resting
         dockHidden = true
         edgeTransitioning = true
         edgeMotionToken += 1
@@ -499,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard animated && motionEnabled else { finish(); return }
         var parked = mainPanel.frame
         parked.origin.x = edge == "left" ? bounds.minX - parked.width + 8 : bounds.maxX - 8
-        animateEdge(toX: parked.minX, duration: 0.19, spring: false, completion: finish)
+        animateEdge(toX: parked.minX, duration: 0.12, spring: false, completion: finish)
     }
 
     private func revealFromEdge(animated: Bool = true) {
@@ -543,7 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 guard let self else { timer.invalidate(); return }
                 let progress = min(1, (ProcessInfo.processInfo.systemUptime - started) / duration)
                 let eased = spring ? 1 - exp(-9 * progress) * cos(8 * progress) :
-                    progress * progress * (3 - 2 * progress)
+                    1 - pow(1 - progress, 3)
                 var frame = self.mainPanel.frame
                 frame.origin.x = initial + (target - initial) * eased
                 self.mainPanel.setFrame(frame, display: true)
@@ -679,7 +682,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self.revealFromEdge()
             let movingIn = !self.dockHidden && self.edgeTransitioning && self.mainPanel.isVisible &&
                 self.mainPanel.frame.size == frame.size
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.00) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                self.pollEdge(pointer: NSPoint(x: bounds.midX, y: bounds.minY + 5))
+                let interrupted = self.dockHidden && self.edgeTransitioning
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                    let quickHidden = self.dockHidden && !self.edgeTransitioning && !self.mainPanel.isVisible
+                    self.revealFromEdge()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.00) {
                 let actual = self.mainPanel.frame
                 let frameRestored = abs(actual.minX - frame.minX) <= 1 && abs(actual.minY - frame.minY) <= 1 &&
                     abs(actual.width - frame.width) <= 1 && abs(actual.height - frame.height) <= 1
@@ -700,10 +709,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     self.closeCapture()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
                         let captureHidden = !self.capturePanel.isVisible && !self.closingCapture
-                        let passed = movingOut && hidden && movingIn && revealed && fadedStart && captureShown && captureHidden
-                        print("Motion regression: \(passed ? "PASS" : "FAIL") — out=\(movingOut), hidden=\(hidden), in=\(movingIn), revealed=\(revealed), faded=\(fadedStart), capture=\(captureShown), closed=\(captureHidden)")
+                        let passed = movingOut && hidden && movingIn && interrupted && quickHidden && revealed && fadedStart && captureShown && captureHidden
+                        print("Motion regression: \(passed ? "PASS" : "FAIL") — out=\(movingOut), hidden=\(hidden), in=\(movingIn), interrupted=\(interrupted), quickHidden=\(quickHidden), revealed=\(revealed), faded=\(fadedStart), capture=\(captureShown), closed=\(captureHidden)")
                         fflush(stdout)
                         exit(passed ? 0 : 1)
+                    }
+                }
                     }
                 }
             }

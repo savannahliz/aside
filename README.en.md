@@ -10,18 +10,18 @@
 
 You are working on one thing when another idea appears. Switching apps to record it breaks your flow; ignoring it risks losing it. Aside keeps the detour short: **press a shortcut → write one line → return to your work.**
 
-It is a small desktop Inbox, not a wall of separate sticky-note windows. Every thought goes into one list, unpinned by default. Only the three items you choose can stay in sight. Notes stay on your device; no account, cloud sync, or AI service is required.
+It is a small desktop Inbox, not a wall of separate sticky-note windows. Every thought goes into one list, unpinned by default. The items you pin stay in sight, and you can set the pin limit in Settings. Notes stay on your device; no account, cloud sync, or AI service is required.
 
 ## Get started
 
-1. Download the installer for your system from [v1.1.0 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.0). The source archives are not runnable apps.
+1. Download the installer for your system from [v1.1.1 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.1). The source archives are not runnable apps.
 2. Launch Aside. Press the capture shortcut from any app to bring up the centered input bar.
 3. Type and press **Enter**. The bar disappears and the item lands in Inbox. Press **Esc** to cancel. You can change the capture shortcut and submit key in Settings.
 
 | Platform | Download | Default capture shortcut |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.0/Aside-1.1.0-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.0/Aside-1.1.0-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-Windows-x64.exe) | Ctrl + Alt + Space |
 
 On Mac, open the DMG and drag `Aside.app` into Applications. It lives in the menu bar, not the Dock. On Windows, run `Aside.exe`; no separate .NET installation is needed. You can find it in the system tray.
 
@@ -30,8 +30,8 @@ On Mac, open the DMG and drag `Aside.app` into Applications. It lives in the men
 ## Set the thought aside; keep the important work in view
 
 - **Quick capture:** The centered bar appears on demand and disappears after saving. Its cancel button appears on hover; new items go to the regular Inbox by default.
-- **One Inbox, up to three pins:** Expand to review everything or collapse to see just your pins. Pinning a fourth item asks which pin to replace; the replaced item stays in Inbox.
-- **Less desktop clutter:** Use the full list, a three-pin view, or a slim strip. Drag, resize, keep the window on top, or tuck it against either screen edge until you move back to reveal it.
+- **One Inbox, adjustable pin limit:** Expand to review everything or collapse to see just your pins. Click an item to edit it in place. When pins are full, choose which one to replace; the replaced item stays in Inbox.
+- **Less desktop clutter:** Use the full list, pinned-item view, or a slim strip. Drag, resize, keep the window on top, or tuck it against either screen edge until you move back to reveal it.
 - **A quieter appearance:** Pick any background color with the system color picker, save favorites, and separately adjust idle, active, and quick-capture opacity.
 - **Tidy up later:** Restore completed items or clear only the completed ones. The first clear asks for confirmation; you can opt out of future prompts.
 

@@ -48,7 +48,7 @@ public struct Notebook: Codable, Equatable {
     }
 
     @discardableResult
-    public mutating func pin(_ id: UUID, replacing oldID: UUID? = nil) -> PinResult {
+    public mutating func pin(_ id: UUID, replacing oldID: UUID? = nil, limit: Int = 3) -> PinResult {
         guard let index = items.firstIndex(where: { $0.id == id }), !items[index].completed else {
             return .invalid
         }
@@ -61,7 +61,7 @@ public struct Notebook: Codable, Equatable {
             rank = items[oldIndex].pinOrder
             items[oldIndex].pinned = false
         } else {
-            guard pins.count < 3 else { return .needsReplacement }
+            guard pins.count < max(1, min(20, limit)) else { return .needsReplacement }
             rank = pins.count
         }
         items[index].pinned = true
@@ -74,6 +74,14 @@ public struct Notebook: Codable, Equatable {
         guard let i = items.firstIndex(where: { $0.id == id }) else { return }
         items[i].pinned = false
         normalizePins()
+    }
+
+    @discardableResult
+    public mutating func edit(_ id: UUID, content: String) -> Bool {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let i = items.firstIndex(where: { $0.id == id }) else { return false }
+        items[i].content = text
+        return true
     }
 
     public mutating func toggleCompleted(_ id: UUID) {
@@ -111,7 +119,7 @@ public struct Notebook: Codable, Equatable {
 
     public func validated() throws -> Notebook {
         guard Set(items.map(\.id)).count == items.count,
-              pins.count <= 3,
+              pins.count <= 20,
               !items.contains(where: { $0.pinned && $0.completed }) else {
             throw CocoaError(.fileReadCorruptFile)
         }

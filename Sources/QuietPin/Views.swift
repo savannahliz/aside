@@ -50,6 +50,7 @@ struct InboxView: View {
     let openSettings: () -> Void
     let minimize: () -> Void
     let hoverChanged: (Bool) -> Void
+    let editingChanged: (Bool) -> Void
     @ViewState private var draft = ""
     @ViewState private var pinDraft = false
     @ViewState private var replacingDraft = false
@@ -57,6 +58,8 @@ struct InboxView: View {
     @ViewState private var confirmingClearCompleted = false
     @ViewState private var hovering = false
     @ViewState private var draggedPin: UUID? = nil
+    @ViewState private var editingID: UUID? = nil
+    @ViewState private var editDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -83,11 +86,11 @@ struct InboxView: View {
                     }
                     .frame(height: 24)
                     .overlay(WindowDragArea())
-                    Label("\(store.notebook.pins.count)/3", systemImage: "pin.fill")
+                    Label("\(store.notebook.pins.count)/\(store.preferences.pinCapacity)", systemImage: "pin.fill")
                         .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
                     windowButtons
                     IconButton(symbol: "gearshape", label: "设置", action: openSettings)
-                    IconButton(symbol: "arrow.down.right.and.arrow.up.left", label: "仅显示三条 Pin", action: toggleCollapsed)
+                    IconButton(symbol: "arrow.down.right.and.arrow.up.left", label: "仅显示置顶事项", action: toggleCollapsed)
                 }
                 .padding(.horizontal, 18).padding(.top, 17).padding(.bottom, 12)
                 Divider().padding(.horizontal, 18)
@@ -102,7 +105,9 @@ struct InboxView: View {
                             .padding(.horizontal, 10)
                     }
                     ForEach(store.notebook.pins) { item in
-                        ItemRow(item: item, store: store, compact: store.preferences.collapsed)
+                        ItemRow(item: item, store: store, compact: store.preferences.collapsed,
+                                editing: editingID == item.id, editDraft: $editDraft,
+                                beginEdit: { startEditing(item) }, saveEdit: { saveEdit(item.id) }, cancelEdit: { cancelEdit(item.id) })
                             .onDrag {
                                 draggedPin = item.id
                                 return NSItemProvider(object: item.id.uuidString as NSString)
@@ -115,7 +120,9 @@ struct InboxView: View {
                             Divider().padding(.vertical, 9).padding(.horizontal, 8)
                         }
                         ForEach(store.notebook.inbox) { item in
-                            ItemRow(item: item, store: store, compact: false)
+                            ItemRow(item: item, store: store, compact: false,
+                                    editing: editingID == item.id, editDraft: $editDraft,
+                                    beginEdit: { startEditing(item) }, saveEdit: { saveEdit(item.id) }, cancelEdit: { cancelEdit(item.id) })
                         }
                         if store.notebook.inbox.isEmpty && store.notebook.pins.isEmpty {
                             VStack(alignment: .leading, spacing: 9) {
@@ -123,7 +130,7 @@ struct InboxView: View {
                                     .padding(.bottom, 5)
                                 Text("想到就记，记完就走。")
                                     .font(.system(size: 15, weight: .medium))
-                                Text("随手记入 Inbox，把最想看见的\n三件事 Pin 在这里。")
+                                Text("随手记入 Inbox，把最想看见的事项 Pin 在这里。")
                                     .font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(4)
                             }
                             .padding(.horizontal, 10).padding(.vertical, 32)
@@ -132,7 +139,9 @@ struct InboxView: View {
                         if !store.notebook.done.isEmpty {
                             DisclosureGroup(isExpanded: $showDone) {
                                 ForEach(store.notebook.done) { item in
-                                    ItemRow(item: item, store: store, compact: false)
+                                    ItemRow(item: item, store: store, compact: false,
+                                            editing: editingID == item.id, editDraft: $editDraft,
+                                            beginEdit: { startEditing(item) }, saveEdit: { saveEdit(item.id) }, cancelEdit: { cancelEdit(item.id) })
                                 }
                             } label: {
                                 HStack {
@@ -192,6 +201,7 @@ struct InboxView: View {
         .preferredColorScheme(store.preferences.background.isDark ? .dark : .light)
         .tint(accent)
         .onHover { inside in
+            if !inside, let editingID { saveEdit(editingID) }
             hovering = inside
             hoverChanged(inside)
         }
@@ -226,8 +236,28 @@ struct InboxView: View {
 
     private func submitDraft() {
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if pinDraft && store.notebook.pins.count == 3 { replacingDraft = true; return }
+        if pinDraft && store.notebook.pins.count >= store.preferences.pinCapacity { replacingDraft = true; return }
         if store.add(draft, pinned: pinDraft) { draft = ""; pinDraft = false }
+    }
+
+    private func startEditing(_ item: Item) {
+        editDraft = item.content
+        editingID = item.id
+        editingChanged(true)
+    }
+
+    private func saveEdit(_ id: UUID) {
+        guard editingID == id else { return }
+        if editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            store.edit(id, content: editDraft) {
+            cancelEdit(id)
+        }
+    }
+
+    private func cancelEdit(_ id: UUID) {
+        guard editingID == id else { return }
+        editingID = nil
+        editingChanged(false)
     }
 }
 
@@ -235,7 +265,13 @@ struct ItemRow: View {
     let item: Item
     @ObservedObject var store: Store
     let compact: Bool
+    let editing: Bool
+    @Binding var editDraft: String
+    let beginEdit: () -> Void
+    let saveEdit: () -> Void
+    let cancelEdit: () -> Void
     @ViewState private var hovering = false
+    @FocusState private var editFocused: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
@@ -246,12 +282,30 @@ struct ItemRow: View {
             }
             .buttonStyle(.plain).help(item.completed ? "恢复事项" : "标记完成")
             .accessibilityLabel(item.completed ? "恢复 \(item.content)" : "完成 \(item.content)")
-            Text(item.content)
-                .font(.system(size: 13, weight: item.pinned ? .medium : .regular))
-                .strikethrough(item.completed)
-                .foregroundStyle(item.completed ? .secondary : .primary)
-                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 3)
+            if editing {
+                TextField("修改事项", text: $editDraft)
+                    .font(.system(size: 13, weight: item.pinned ? .medium : .regular))
+                    .textFieldStyle(.plain)
+                    .focused($editFocused)
+                    .onAppear { editFocused = true }
+                    .onDisappear(perform: cancelEdit)
+                    .onSubmit(saveEdit)
+                    .onExitCommand(perform: cancelEdit)
+                    .onChange(of: editFocused) { focused in if !focused { saveEdit() } }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 3)
+            } else {
+                Button(action: beginEdit) {
+                    Text(item.content)
+                        .font(.system(size: 13, weight: item.pinned ? .medium : .regular))
+                        .strikethrough(item.completed)
+                        .foregroundStyle(item.completed ? .secondary : .primary)
+                        .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).help("点击修改事项")
+                .accessibilityLabel("修改 \(item.content)")
+            }
             if !item.completed {
                 IconButton(symbol: item.pinned ? "pin.fill" : "pin", label: item.pinned ? "取消置顶 \(item.content)" : "置顶 \(item.content)") {
                     store.requestPin(item.id)
@@ -295,7 +349,7 @@ struct ReplacementView: View {
     let cancel: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("三条 Pin 已满").font(.headline)
+            Text("\(store.preferences.pinCapacity) 条 Pin 已满").font(.headline)
             Text("选择一条替换。原事项会留在 Inbox。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             ForEach(store.notebook.pins) { item in
@@ -459,6 +513,11 @@ struct SettingsView: View {
         Form {
             Section("通用") {
                 Toggle("窗口始终置顶", isOn: $store.preferences.alwaysOnTop)
+                Stepper("最多置顶 \(store.preferences.pinCapacity) 条", value: Binding(
+                    get: { store.preferences.pinCapacity },
+                    set: { store.preferences.pinLimit = $0 }), in: 1...20)
+                Text("调低数量不会移除已有置顶；可手动取消多余置顶。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("登录时启动 Aside", isOn: Binding(get: { loginEnabled }, set: setLogin))
                 if let loginMessage { Text(loginMessage).font(.caption).foregroundStyle(.secondary) }
                 ShortcutRecorder(store: store)
