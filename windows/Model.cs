@@ -132,10 +132,13 @@ public sealed class Store
     private readonly bool writable;
     public Notebook Book { get; private set; } = new();
     public string? LoadError { get; }
+    // True on the very first launch, before any notes or settings have been saved.
+    public bool FirstLaunch { get; }
     private static readonly JsonSerializerOptions options = new() { WriteIndented = true };
     public Store(string directory)
     {
         path = Path.Combine(directory, "inbox.json");
+        FirstLaunch = !File.Exists(path);
         try
         {
             if (File.Exists(path)) Book = JsonSerializer.Deserialize<Notebook>(File.ReadAllText(path)) ?? throw new InvalidDataException();

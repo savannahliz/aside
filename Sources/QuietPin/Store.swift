@@ -63,17 +63,21 @@ final class Store: ObservableObject {
     @Published var recordingShortcut = false
     @Published var captureText = ""
     @Published var captureSession = UUID()
+    // True on the very first launch: no saved preferences and no notes yet.
+    @Published var showWelcome = false
     private let file: NotebookFile
     private let defaults: UserDefaults
     private var canSave = true
 
     init(directory: URL? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        let hadPreferences = defaults.data(forKey: "preferences") != nil
         preferences = defaults.data(forKey: "preferences")
             .flatMap { try? JSONDecoder().decode(Preferences.self, from: $0) } ?? Preferences()
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("QuietPin", isDirectory: true)
         file = NotebookFile(url: root.appendingPathComponent("inbox.json"))
+        showWelcome = !hadPreferences && !FileManager.default.fileExists(atPath: file.url.path)
         do { notebook = try file.load() }
         catch {
             canSave = false

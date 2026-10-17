@@ -511,6 +511,20 @@ struct SettingsView: View {
     @ViewState private var loginMessage: String? = nil
     var body: some View {
         Form {
+            if store.showWelcome {
+                Section {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("欢迎使用 Aside").font(.headline)
+                        Text("安装完成。Aside 常驻在屏幕顶部菜单栏的图钉图标里，不显示在 Dock。")
+                            .foregroundStyle(.secondary)
+                        Text("先在下方「全局快捷键」设置呼出快速记录的组合键（当前为 \(store.preferences.shortcutLabel)）。之后在任何应用里按下它，就能随手记一句。")
+                            .foregroundStyle(.secondary)
+                        HStack { Spacer(); Button("知道了") { store.showWelcome = false } }
+                    }
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Section("通用") {
                 Toggle("窗口始终置顶", isOn: $store.preferences.alwaysOnTop)
                 Stepper("最多置顶 \(store.preferences.pinCapacity) 条", value: Binding(

@@ -42,6 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var edgeMotionTimer: Timer?
     private var dockTimer: Timer?
     private var userDragging = false
+    // A note docked from a previous session starts visible and only hides after the pointer has
+    // visited it once, so launching never leaves the user with nothing on screen.
+    private var edgeArmed = true
     private weak var captureInput: NSTextField?
     private var captureLocalMonitor: Any?
     private var captureGlobalMonitor: Any?
@@ -89,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }.store(in: &subscriptions)
         applyPreferences()
         mainPanel.orderFrontRegardless()
-        if store.preferences.dockEdge != nil { dockFrame = mainPanel.frame; hideAtEdge(animated: false) }
+        if store.preferences.dockEdge != nil { dockFrame = mainPanel.frame; edgeArmed = false }
         dockTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.pollEdge() }
         }
@@ -97,6 +100,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if captureRegression { DispatchQueue.main.async { self.runCaptureRegression() } }
         if edgeRegression { DispatchQueue.main.async { self.runEdgeRegression() } }
         if motionRegression { DispatchQueue.main.async { self.runMotionRegression() } }
+        // First launch: open Settings with a welcome note so the user knows Aside is running and sets a shortcut.
+        if store.showWelcome && !(smoke || uiTest || captureRegression || edgeRegression || motionRegression) {
+            DispatchQueue.main.async { self.showSettings() }
+        }
     }
 
     private func makePanel(rect: NSRect) -> FloatingPanel {
@@ -219,7 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func updateOpacity() {
         guard mainPanel != nil else { return }
         let prefs = store.preferences
-        edgePanel.alphaValue = min(1, max(0.65, prefs.idleOpacity))
+        // The edge tab stays invisible: hovering the screen edge still reveals the note, but nothing is left on screen.
+        edgePanel.alphaValue = 0
         guard !dockHidden else { return }
         if prefs.dockEdge != nil {
             // Keep a docked note fully readable until the instant it hides.
@@ -459,6 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 dockFrame = snapped
                 updateOpacity()
             }
+            edgeArmed = true
             rememberFrame()
         }
         let visiblePanel: NSWindow = dockHidden ? edgePanel : mainPanel
@@ -468,8 +477,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let hoverFrame = edgeTransitioning && !dockHidden ? (dockFrame ?? visiblePanel.frame) : visiblePanel.frame
         let hit = hoverFrame.insetBy(dx: -3, dy: -3).contains(pointer ?? NSEvent.mouseLocation)
         if hit {
+            edgeArmed = true
             revealFromEdge()
-        } else {
+        } else if edgeArmed {
             hideAtEdge()
         }
     }

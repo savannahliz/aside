@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-build_label="${ASIDE_BUILD_LABEL:-1.1.1}"
+build_label="${ASIDE_BUILD_LABEL:-1.1.3}"
 mkdir -p .build/arm64 .build/x86_64 dist/Aside.app/Contents/MacOS dist/Aside.app/Contents/Resources
 sdk="${SDKROOT:-$(xcrun --show-sdk-path)}"
 for arch in arm64 x86_64; do

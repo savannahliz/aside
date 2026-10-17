@@ -10,6 +10,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -26,6 +27,7 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] internal static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("dwmapi.dll")] internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
     [DllImport("user32.dll")] internal static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
     [DllImport("gdi32.dll")] internal static extern uint GetPixel(IntPtr dc, int x, int y);
     [DllImport("user32.dll")] internal static extern IntPtr MonitorFromPoint(POINT point, uint flags);
@@ -48,6 +50,7 @@ public sealed class App : Application
     private bool closingCapture;
     private bool reopenCapture;
     internal string? ShortcutError;
+    internal bool Welcome;
     internal bool Quitting;
     internal static readonly string[] ShortcutLabels = { "Ctrl + Alt + Space", "Ctrl + Shift + Space", "Alt + Shift + Space" };
 
@@ -102,6 +105,8 @@ public sealed class App : Application
         tray.ContextMenuStrip = menu;
         tray.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) Dispatcher.Invoke(ShowInbox); };
         if (Store.LoadError != null) MessageBox.Show(Store.LoadError, "Aside 记录载入失败");
+        // First launch: open Settings with a welcome note so the user knows Aside is running and sets a shortcut.
+        else if (Store.FirstLaunch) { Welcome = true; ShowSettings(); }
         Perf.Log($"start: {(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds:F0} ms to ready; OS {Environment.OSVersion.Version}, " +
             $"{RuntimeInformation.OSArchitecture} OS / {RuntimeInformation.ProcessArchitecture} process, render tier {RenderCapability.Tier >> 16}, animations {SystemParameters.ClientAreaAnimation}");
     }
@@ -253,6 +258,9 @@ internal static class Perf
 
 internal static class UI
 {
+    // Transparent windows get no system shadow, so they reserve this margin and draw one themselves.
+    internal const double Shadow = 14;
+    internal static DropShadowEffect ShadowEffect() => new() { BlurRadius = 22, ShadowDepth = 4, Direction = 270, Opacity = .22, Color = Colors.Black };
     internal static TextBlock Text(string text, double size = 13) => new()
     {
         Text = text, FontSize = size, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 5, 0, 5)
@@ -330,6 +338,16 @@ internal static class UI
         System.Windows.Automation.AutomationProperties.SetName(button, text);
         return button;
     }
+    // Windows fades top-level windows in and out on show/hide. The macOS panels turn this off
+    // (animationBehavior = .none); without it a docked note leaves a fading ghost after it hides.
+    internal static void DisableSystemAnimations(Window window)
+    {
+        window.SourceInitialized += (_, _) =>
+        {
+            var disabled = 1;
+            Native.DwmSetWindowAttribute(new WindowInteropHelper(window).Handle, 3, ref disabled, sizeof(int)); // DWMWA_TRANSITIONS_FORCEDISABLED
+        };
+    }
     internal static Brush Muted(Brush foreground) =>
         foreground is SolidColorBrush solid ? new SolidColorBrush(Color.FromArgb(150, solid.Color.R, solid.Color.G, solid.Color.B)) : Brushes.Gray;
     internal static Window Dialog(string title, double width, double height, Window? owner = null) => new()
@@ -349,7 +367,10 @@ internal static class UI
 internal sealed class MainWindow : Window
 {
     private readonly App app;
-    private readonly Border surface = new() { CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1) };
+    private const double Shadow = UI.Shadow;
+    private readonly Border surface = new() { CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1), Margin = new Thickness(Shadow) };
+    // Separate layer so typing or hovering re-renders the content without re-blurring the shadow.
+    private readonly Border shadow = new() { CornerRadius = new CornerRadius(16), Margin = new Thickness(Shadow), Effect = UI.ShadowEffect() };
     private readonly TextBox input = new() { FontSize = 14, MinWidth = 80, Padding = new Thickness(2, 4, 2, 4), BorderThickness = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock inputPlaceholder = new() { Text = "记下一件事…", FontSize = 14, Margin = new Thickness(4, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
     private readonly Grid inputArea = new();
@@ -374,6 +395,9 @@ internal sealed class MainWindow : Window
     private Action? finishInlineEdit;
     private int edgeMotionToken;
     private bool userDragging;
+    // A note docked from a previous session starts visible and only hides after the pointer has
+    // visited it once, so launching never leaves the user with nothing on screen.
+    private bool edgeArmed = true;
 
     internal MainWindow(App app)
     {
@@ -384,15 +408,18 @@ internal sealed class MainWindow : Window
         // A borderless window has no resize frame; WindowChrome restores edge and corner resizing like macOS.
         System.Windows.Shell.WindowChrome.SetWindowChrome(this, new System.Windows.Shell.WindowChrome
         {
-            CaptionHeight = 0, ResizeBorderThickness = new Thickness(6), GlassFrameThickness = new Thickness(0),
+            CaptionHeight = 0, ResizeBorderThickness = new Thickness(Shadow + 6), GlassFrameThickness = new Thickness(0),
             CornerRadius = new CornerRadius(0), UseAeroCaptionButtons = false
         });
         var p = app.Store.Book.Preferences;
         SetSizeLimits();
-        Width = p.StripMode ? p.StripWidth : (p.Collapsed ? p.CompactWidth : p.ExpandedWidth);
-        Height = p.StripMode ? 30 : (p.Collapsed ? p.CompactHeight : p.ExpandedHeight);
-        Left = p.Left; Top = p.Top;
-        Content = surface;
+        // Preferences store the visible note's frame; the window adds the shadow margin around it.
+        Width = (p.StripMode ? p.StripWidth : (p.Collapsed ? p.CompactWidth : p.ExpandedWidth)) + 2 * Shadow;
+        Height = (p.StripMode ? 30 : (p.Collapsed ? p.CompactHeight : p.ExpandedHeight)) + 2 * Shadow;
+        Left = p.Left - Shadow; Top = p.Top - Shadow;
+        var frame = new Grid();
+        frame.Children.Add(shadow); frame.Children.Add(surface);
+        Content = frame;
         inputArea.Children.Add(input); inputArea.Children.Add(inputPlaceholder);
         input.KeyDown += (_, e) => { if (e.Key == Key.Enter) { SaveInput(); e.Handled = true; } };
         input.TextChanged += (_, _) =>
@@ -415,10 +442,11 @@ internal sealed class MainWindow : Window
         Loaded += (_, _) =>
         {
             ClampToScreen();
-            if (p.DockEdge != null) { dockFrame = new Rect(Left, Top, Width, Height); HideAtEdge(false); }
+            if (p.DockEdge != null) { dockFrame = new Rect(Left, Top, Width, Height); edgeArmed = false; }
             edgeTimer.Start();
         };
         edgeTimer.Tick += (_, _) => PollEdge();
+        UI.DisableSystemAnimations(this); UI.DisableSystemAnimations(edgeHandle);
         Closing += (_, e) => { if (!app.Quitting) { e.Cancel = true; HideToTray(); } };
         Render();
     }
@@ -434,6 +462,7 @@ internal sealed class MainWindow : Window
         Foreground = dark ? Brushes.WhiteSmoke : new SolidColorBrush(Color.FromRgb(45, 49, 44));
         muted = UI.Muted(Foreground);
         surface.Background = new SolidColorBrush(color);
+        shadow.Background = surface.Background;
         surface.BorderBrush = new SolidColorBrush(dark ? Color.FromArgb(40, 255, 255, 255) : Color.FromArgb(26, 0, 0, 0));
         input.Foreground = Foreground; input.CaretBrush = Foreground; input.Background = Brushes.Transparent;
         inputPlaceholder.Foreground = muted;
@@ -501,14 +530,28 @@ internal sealed class MainWindow : Window
             var done = app.Store.Book.Items.Where(i => i.Completed).OrderByDescending(i => i.CreatedAt).ToArray();
             if (done.Length > 0)
             {
-                var doneRows = new StackPanel(); foreach (var item in done) doneRows.Children.Add(Row(item));
-                var doneHeader = new StackPanel { Orientation = Orientation.Horizontal };
-                doneHeader.Children.Add(new TextBlock { Text = $"已完成 · {done.Length}", FontSize = 11, Foreground = muted, VerticalAlignment = VerticalAlignment.Center });
+                var doneRows = new StackPanel { Visibility = showDone ? Visibility.Visible : Visibility.Collapsed };
+                foreach (var item in done) doneRows.Children.Add(Row(item));
+                // A small chevron like the macOS DisclosureGroup, in place of WPF's circled Expander button.
+                var chevron = UI.Glyph("\uE76C", 8);
+                chevron.Foreground = muted; chevron.Margin = new Thickness(0, 1, 7, 0);
+                chevron.RenderTransformOrigin = new Point(.5, .5); chevron.RenderTransform = new RotateTransform(showDone ? 90 : 0);
+                var doneHeader = new DockPanel { Background = Brushes.Transparent, Cursor = Cursors.Hand, Margin = new Thickness(7, 15, 7, 4) };
+                System.Windows.Automation.AutomationProperties.SetName(doneHeader, "展开或收起已完成事项");
+                DockPanel.SetDock(chevron, Dock.Left); doneHeader.Children.Add(chevron);
                 var clearDone = UI.Flat(new TextBlock { Text = "清空", FontSize = 11, Foreground = muted }, "清空已完成事项", RequestClearCompleted, 34, 22);
-                clearDone.Margin = new Thickness(10, 0, 0, 0); doneHeader.Children.Add(clearDone);
-                var expander = new Expander { Header = doneHeader, Content = doneRows, IsExpanded = showDone, Foreground = Foreground, Margin = new Thickness(7, 15, 7, 4) };
-                expander.Expanded += (_, _) => showDone = true; expander.Collapsed += (_, _) => showDone = false;
-                rows.Children.Add(expander);
+                DockPanel.SetDock(clearDone, Dock.Right); doneHeader.Children.Add(clearDone);
+                doneHeader.Children.Add(new TextBlock { Text = $"已完成 · {done.Length}", FontSize = 11, Foreground = muted, VerticalAlignment = VerticalAlignment.Center });
+                // Claim the press so the window does not start dragging, then toggle on release.
+                doneHeader.MouseLeftButtonDown += (_, e) => e.Handled = true;
+                doneHeader.MouseLeftButtonUp += (_, _) =>
+                {
+                    showDone = !showDone;
+                    doneRows.Visibility = showDone ? Visibility.Visible : Visibility.Collapsed;
+                    chevron.RenderTransform = new RotateTransform(showDone ? 90 : 0);
+                };
+                rows.Children.Add(doneHeader);
+                rows.Children.Add(doneRows);
             }
         }
         else if (app.Store.Book.Pins.Length == 0)
@@ -699,12 +742,12 @@ internal sealed class MainWindow : Window
     {
         var p = app.Store.Book.Preferences;
         MinHeight = 0;
-        MaxHeight = p.StripMode ? 30 : double.PositiveInfinity;
-        MinHeight = p.StripMode ? 30 : (p.Collapsed ? 95 : 280);
-        MinWidth = p.StripMode ? 160 : 290;
+        MaxHeight = p.StripMode ? 30 + 2 * Shadow : double.PositiveInfinity;
+        MinHeight = (p.StripMode ? 30 : (p.Collapsed ? 95 : 280)) + 2 * Shadow;
+        MinWidth = (p.StripMode ? 160 : 290) + 2 * Shadow;
         // The strip has a fixed height, so only its left and right edges resize.
         var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
-        if (chrome != null) chrome.ResizeBorderThickness = p.StripMode ? new Thickness(6, 0, 6, 0) : new Thickness(6);
+        if (chrome != null) chrome.ResizeBorderThickness = p.StripMode ? new Thickness(Shadow + 6, 0, Shadow + 6, 0) : new Thickness(Shadow + 6);
     }
     internal void ChangeMode(bool collapsed, bool strip)
     {
@@ -712,8 +755,8 @@ internal sealed class MainWindow : Window
         app.Commit(b => { b.Preferences.Collapsed = collapsed; b.Preferences.StripMode = strip; }, false);
         var p = app.Store.Book.Preferences;
         SetSizeLimits();
-        Width = p.StripMode ? p.StripWidth : (p.Collapsed ? p.CompactWidth : p.ExpandedWidth);
-        Height = p.StripMode ? 30 : (p.Collapsed ? p.CompactHeight : p.ExpandedHeight);
+        Width = (p.StripMode ? p.StripWidth : (p.Collapsed ? p.CompactWidth : p.ExpandedWidth)) + 2 * Shadow;
+        Height = (p.StripMode ? 30 : (p.Collapsed ? p.CompactHeight : p.ExpandedHeight)) + 2 * Shadow;
         resizingMode = false; ClampToScreen(); Render(); SaveFrame();
         if (p.DockEdge != null) dockFrame = new Rect(Left, Top, Width, Height);
     }
@@ -725,10 +768,11 @@ internal sealed class MainWindow : Window
         var transform = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
         var origin = transform.Transform(new Point(work.Left, work.Top));
         var end = transform.Transform(new Point(work.Right, work.Bottom));
-        Width = Math.Clamp(Width, MinWidth, Math.Max(MinWidth, end.X - origin.X));
-        Height = Math.Clamp(Height, MinHeight, Math.Max(MinHeight, end.Y - origin.Y));
-        Left = Math.Clamp(Left, origin.X, Math.Max(origin.X, end.X - Width));
-        Top = Math.Clamp(Top, origin.Y, Math.Max(origin.Y, end.Y - Height));
+        // The shadow margin may run off screen; only the note itself must stay inside the work area.
+        Width = Math.Clamp(Width, MinWidth, Math.Max(MinWidth, end.X - origin.X + 2 * Shadow));
+        Height = Math.Clamp(Height, MinHeight, Math.Max(MinHeight, end.Y - origin.Y + 2 * Shadow));
+        Left = Math.Clamp(Left, origin.X - Shadow, Math.Max(origin.X - Shadow, end.X - Width + Shadow));
+        Top = Math.Clamp(Top, origin.Y - Shadow, Math.Max(origin.Y - Shadow, end.Y - Height + Shadow));
     }
     private void ScheduleFrame() { if (!IsLoaded || resizingMode) return; frameTimer.Stop(); frameTimer.Start(); }
     internal void SaveFrame()
@@ -737,16 +781,19 @@ internal sealed class MainWindow : Window
         app.Commit(b =>
         {
             var frame = dockHidden && dockFrame.HasValue ? dockFrame.Value : new Rect(Left, Top, Width, Height);
-            var p = b.Preferences; p.Left = frame.Left; p.Top = frame.Top;
-            if (p.StripMode) p.StripWidth = frame.Width;
-            else if (p.Collapsed) { p.CompactWidth = frame.Width; p.CompactHeight = frame.Height; }
-            else { p.ExpandedWidth = frame.Width; p.ExpandedHeight = frame.Height; }
+            var p = b.Preferences; p.Left = frame.Left + Shadow; p.Top = frame.Top + Shadow;
+            var width = frame.Width - 2 * Shadow; var height = frame.Height - 2 * Shadow;
+            if (p.StripMode) p.StripWidth = width;
+            else if (p.Collapsed) { p.CompactWidth = width; p.CompactHeight = height; }
+            else { p.ExpandedWidth = width; p.ExpandedHeight = height; }
         }, false);
     }
     internal void Fade()
     {
         var p = app.Store.Book.Preferences;
-        edgeHandle.Opacity = Math.Clamp(p.IdleOpacity, .65, 1);
+        // Invisible edge tab, as on macOS: an alpha-0 layered window shows nothing and lets clicks through,
+        // while PollEdge still reveals the note when the cursor reaches its strip of the screen edge.
+        edgeHandle.Opacity = 0;
         if (dockHidden) return;
         if (p.DockEdge != null)
         {
@@ -782,16 +829,17 @@ internal sealed class MainWindow : Window
         {
             userDragging = false;
             var work = WorkArea();
-            string? edge = Left <= work.Left + 18 ? "left" : (Left + Width >= work.Right - 18 ? "right" : null);
+            string? edge = Left + Shadow <= work.Left + 18 ? "left" : (Left + Width - Shadow >= work.Right - 18 ? "right" : null);
             app.Commit(b => b.Preferences.DockEdge = edge, false);
             if (edge != null)
             {
                 resizingMode = true;
-                Left = edge == "left" ? work.Left : work.Right - Width;
-                Top = Math.Clamp(Top, work.Top, Math.Max(work.Top, work.Bottom - Height));
+                Left = edge == "left" ? work.Left - Shadow : work.Right - Width + Shadow;
+                Top = Math.Clamp(Top, work.Top - Shadow, Math.Max(work.Top - Shadow, work.Bottom - Height + Shadow));
                 resizingMode = false;
             }
             dockFrame = edge == null ? null : new Rect(Left, Top, Width, Height);
+            edgeArmed = true;
             Fade(); SaveFrame();
         }
         var visibleWindow = dockHidden ? edgeHandle : this;
@@ -800,12 +848,10 @@ internal sealed class MainWindow : Window
         var local = visibleWindow.PointFromScreen(new Point(cursor.X, cursor.Y));
         if (edgeTransitioning && !dockHidden && dockFrame.HasValue)
             local = new Point(local.X + Left - dockFrame.Value.Left, local.Y + Top - dockFrame.Value.Top);
-        if (new Rect(-3, -3, visibleWindow.ActualWidth + 6, visibleWindow.ActualHeight + 6).Contains(local))
-        { RevealFromEdge(); }
-        else
-        {
-            HideAtEdge();
-        }
+        var inset = visibleWindow == this ? Shadow : 0;
+        if (new Rect(inset - 3, inset - 3, visibleWindow.ActualWidth - 2 * inset + 6, visibleWindow.ActualHeight - 2 * inset + 6).Contains(local))
+        { edgeArmed = true; RevealFromEdge(); }
+        else if (edgeArmed) HideAtEdge();
     }
     private void HideAtEdge(bool animated = true)
     {
@@ -818,7 +864,7 @@ internal sealed class MainWindow : Window
         edgeTransitioning = true; var token = ++edgeMotionToken;
         var started = Perf.Start();
         // Swap windows instead of resizing the live transparent content to 8px.
-        edgeHandle.Height = Math.Min(100, rest.Height);
+        edgeHandle.Height = Math.Min(100, rest.Height - 2 * Shadow);
         edgeHandle.Left = app.Store.Book.Preferences.DockEdge == "left" ? work.Left : work.Right - 8;
         edgeHandle.Top = rest.Top + (rest.Height - edgeHandle.Height) / 2;
         void Finish()
@@ -830,7 +876,7 @@ internal sealed class MainWindow : Window
             Perf.Log($"edge hide: done after {Perf.Ms(started)} ms");
         }
         if (!animated || !SystemParameters.ClientAreaAnimation) { Finish(); return; }
-        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width + 8 : work.Right - 8;
+        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width + Shadow + 8 : work.Right - 8 - Shadow;
         var slide = new DoubleAnimation(Left, parked, TimeSpan.FromMilliseconds(120)) {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };
@@ -845,7 +891,7 @@ internal sealed class MainWindow : Window
         var token = ++edgeMotionToken;
         var started = Perf.Start();
         BeginAnimation(LeftProperty, null);
-        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - rest.Width + 8 : work.Right - 8;
+        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - rest.Width + Shadow + 8 : work.Right - 8 - Shadow;
         Left = animated && SystemParameters.ClientAreaAnimation ? parked : rest.Left;
         Top = rest.Top; Width = rest.Width; Height = rest.Height;
         UpdateLayout(); Show(); edgeHandle.Hide();
@@ -885,7 +931,8 @@ internal sealed class CaptureWindow : Window
     internal CaptureWindow(App app)
     {
         this.app = app;
-        Title = "Aside 快速记录"; Width = 660; Height = 64; ResizeMode = ResizeMode.NoResize;
+        UI.DisableSystemAnimations(this);
+        Title = "Aside 快速记录"; Width = 660 + 2 * UI.Shadow; Height = 64 + 2 * UI.Shadow; ResizeMode = ResizeMode.NoResize;
         WindowStyle = WindowStyle.None; AllowsTransparency = true; Background = Brushes.Transparent; Topmost = true; ShowInTaskbar = false;
         FontFamily = new FontFamily("Microsoft YaHei UI");
         var panel = new DockPanel();
@@ -917,6 +964,8 @@ internal sealed class CaptureWindow : Window
         cancelSurface.RenderTransformOrigin = new Point(.5, .5);
         cancelSurface.RenderTransform = cancelScale;
         captureRoot.RenderTransform = captureScale;
+        captureRoot.Margin = new Thickness(UI.Shadow);
+        surface.Effect = UI.ShadowEffect(); cancelSurface.Effect = UI.ShadowEffect();
         DockPanel.SetDock(cancelSurface, Dock.Right); captureRoot.Children.Add(cancelSurface); captureRoot.Children.Add(surface); Content = captureRoot;
         captureRoot.MouseEnter += (_, _) => AnimateCancel(true);
         captureRoot.MouseLeave += (_, _) => AnimateCancel(false);
@@ -964,7 +1013,7 @@ internal sealed class CaptureWindow : Window
         var work = Forms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y)).WorkingArea;
         var monitor = Native.MonitorFromPoint(point, 2);
         var scale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : 1.0;
-        Width = Math.Min(660, work.Width / scale - 40);
+        Width = Math.Min(660, work.Width / scale - 40) + 2 * UI.Shadow;
         var width = (int)Math.Round(Width * scale); var height = (int)Math.Round(Height * scale);
         Native.SetWindowPos(hwnd, IntPtr.Zero, work.Left + (work.Width - width) / 2, work.Top + (work.Height - height) / 2, 0, 0, 0x0001 | 0x0004 | 0x0010);
         Perf.Log($"capture place: work {work}, dpi scale {scale:F2}, size {width}x{height}");
@@ -1089,6 +1138,18 @@ internal sealed class SettingsWindow : Window
     private void Render()
     {
         stack.Children.Clear(); var p = app.Store.Book.Preferences;
+
+        if (app.Welcome)
+        {
+            var welcome = Card("欢迎使用 Aside");
+            var body = new StackPanel { Margin = new Thickness(14, 12, 14, 12) };
+            body.Children.Add(new TextBlock { Text = "安装完成。Aside 已在后台运行，可在屏幕右下角的系统托盘中找到它（可能收在“^”里）。", TextWrapping = TextWrapping.Wrap, LineHeight = 19 });
+            var current = p.CustomKeyLabel ?? App.ShortcutLabels[Math.Clamp(p.Shortcut, 0, 2)];
+            body.Children.Add(new TextBlock { Text = $"先在下方「全局快捷键」设置呼出快速记录的组合键（当前为 {current}）。之后在任何应用里按下它，就能随手记一句。", FontSize = 12, Foreground = Secondary, TextWrapping = TextWrapping.Wrap, LineHeight = 18, Margin = new Thickness(0, 6, 0, 10) });
+            var ok = UI.Pill("知道了", () => { app.Welcome = false; Render(); });
+            ok.HorizontalAlignment = HorizontalAlignment.Right;
+            body.Children.Add(ok); welcome.Children.Add(body);
+        }
 
         var general = Card("通用");
         AddRow(general, "窗口始终置顶", null, Switch(p.Topmost, value => app.Commit(b => b.Preferences.Topmost = value)));
