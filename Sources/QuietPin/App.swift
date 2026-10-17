@@ -45,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // A note docked from a previous session starts visible and only hides after the pointer has
     // visited it once, so launching never leaves the user with nothing on screen.
     private var edgeArmed = true
+    // Room for the window shadow so no part of it is left on screen when parked off the edge.
+    private static let shadowClearance: CGFloat = 24
     private weak var captureInput: NSTextField?
     private var captureLocalMonitor: Any?
     private var captureGlobalMonitor: Any?
@@ -511,8 +513,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         guard animated && motionEnabled else { finish(); return }
         var parked = mainPanel.frame
-        parked.origin.x = edge == "left" ? bounds.minX - parked.width + 8 : bounds.maxX - 8
-        animateEdge(toX: parked.minX, duration: 0.12, spring: false, completion: finish)
+        // Slide fully off screen, shadow included. The invisible edge tab no longer covers an 8 pt
+        // sliver, so stopping short left a ghost strip for the last frame before the panel hid.
+        parked.origin.x = edge == "left" ? bounds.minX - parked.width - Self.shadowClearance : bounds.maxX + Self.shadowClearance
+        animateEdge(toX: parked.minX, duration: 0.12, spring: false, fadeOut: true, completion: finish)
     }
 
     private func revealFromEdge(animated: Bool = true) {
@@ -527,7 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             ?? NSScreen.main!.visibleFrame
         var parked = target
         let left = store.preferences.dockEdge == "left"
-        parked.origin.x = left ? bounds.minX - parked.width + 8 : bounds.maxX - 8
+        parked.origin.x = left ? bounds.minX - parked.width - Self.shadowClearance : bounds.maxX + Self.shadowClearance
         mainPanel.setFrame(animated && motionEnabled ? parked : target, display: true)
         mainPanel.contentView?.layoutSubtreeIfNeeded()
         mainPanel.contentView?.displayIfNeeded()
@@ -546,20 +550,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         animateEdge(toX: target.minX, duration: 0.30, spring: true, completion: finish)
     }
 
-    private func animateEdge(toX target: CGFloat, duration: TimeInterval, spring: Bool,
+    private func animateEdge(toX target: CGFloat, duration: TimeInterval, spring: Bool, fadeOut: Bool = false,
                              completion: @escaping @MainActor () -> Void) {
         edgeMotionTimer?.invalidate()
         let initial = mainPanel.frame.minX
+        let initialAlpha = mainPanel.alphaValue
         let started = ProcessInfo.processInfo.systemUptime
         edgeMotionTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
                 let progress = min(1, (ProcessInfo.processInfo.systemUptime - started) / duration)
-                let eased = spring ? 1 - exp(-9 * progress) * cos(8 * progress) :
-                    1 - pow(1 - progress, 3)
+                // Hiding accelerates away (ease-in): with ease-out the note crept across its last few
+                // visible points at the slowest speed, which read as a ghost strip at the screen edge.
+                let eased = spring ? 1 - exp(-9 * progress) * cos(8 * progress) : progress * progress
                 var frame = self.mainPanel.frame
                 frame.origin.x = initial + (target - initial) * eased
                 self.mainPanel.setFrame(frame, display: true)
+                // At 60 Hz a 120 ms slide has ~7 frames, so the last visible frame still shows a readable
+                // chunk of the note that then vanishes at once. Fading while sliding leaves it nearly clear.
+                if fadeOut { self.mainPanel.alphaValue = initialAlpha * pow(1 - progress, 1.5) }
                 if progress >= 1 {
                     timer.invalidate()
                     self.edgeMotionTimer = nil

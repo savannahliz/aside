@@ -876,12 +876,20 @@ internal sealed class MainWindow : Window
             Perf.Log($"edge hide: done after {Perf.Ms(started)} ms");
         }
         if (!animated || !SystemParameters.ClientAreaAnimation) { Finish(); return; }
-        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width + Shadow + 8 : work.Right - 8 - Shadow;
+        // Slide fully off screen, shadow margin included: with the edge tab invisible, an 8 px sliver
+        // left on screen read as a ghost in the last frame before the window hid.
+        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width : work.Right;
+        // Accelerate away (ease-in): easing out made the last visible sliver crawl off the edge.
         var slide = new DoubleAnimation(Left, parked, TimeSpan.FromMilliseconds(120)) {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn }
         };
         slide.Completed += (_, _) => Finish();
         BeginAnimation(LeftProperty, slide);
+        // At 60 Hz a 120 ms slide has ~7 frames, so the last visible frame still shows a readable chunk of
+        // the note that then vanishes at once. Fading while sliding (to (1 - t)^1.5, as on macOS) clears it.
+        BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(120)) {
+            EasingFunction = new PowerEase { Power = 1.5, EasingMode = EasingMode.EaseOut }
+        });
     }
     private void RevealFromEdge(bool animated = true)
     {
@@ -891,9 +899,12 @@ internal sealed class MainWindow : Window
         var token = ++edgeMotionToken;
         var started = Perf.Start();
         BeginAnimation(LeftProperty, null);
-        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - rest.Width + Shadow + 8 : work.Right - 8 - Shadow;
+        var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - rest.Width : work.Right;
         Left = animated && SystemParameters.ClientAreaAnimation ? parked : rest.Left;
         Top = rest.Top; Width = rest.Width; Height = rest.Height;
+        // Undo the hide fade before the note becomes visible again.
+        BeginAnimation(OpacityProperty, null);
+        Opacity = Math.Clamp(app.Store.Book.Preferences.ActiveOpacity, .15, 1);
         UpdateLayout(); Show(); edgeHandle.Hide();
         void Finish()
         {

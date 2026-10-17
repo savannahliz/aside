@@ -14,14 +14,14 @@ It is a small desktop Inbox, not a wall of separate sticky-note windows. Every t
 
 ## Get started
 
-1. Download the installer for your system from [v1.1.3 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.3). The source archives are not runnable apps.
+1. Download the installer for your system from [v1.1.4 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.4). The source archives are not runnable apps.
 2. Launch Aside. Press the capture shortcut from any app to bring up the centered input bar.
 3. Type and press **Enter**. The bar disappears and the item lands in Inbox. Press **Esc** to cancel. You can change the capture shortcut and submit key in Settings.
 
 | Platform | Download | Default capture shortcut |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.3/Aside-1.1.3-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.3/Aside-1.1.3-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.4/Aside-1.1.4-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.4/Aside-1.1.4-Windows-x64.exe) | Ctrl + Alt + Space |
 
 > [!WARNING]
 > ### Installing on Mac (please read)

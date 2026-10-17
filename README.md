@@ -14,14 +14,14 @@
 
 ## 快速上手
 
-1. 从 [v1.1.3 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.3) 下载适合你系统的安装包。源码压缩包不能直接运行。
+1. 从 [v1.1.4 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.4) 下载适合你系统的安装包。源码压缩包不能直接运行。
 2. 启动 Aside。在任何应用中按快速记录快捷键，屏幕中央会出现输入条。
 3. 输入内容并按 **Enter**：输入条消失，内容进入 Inbox；按 **Esc** 可取消。快捷键和保存键均可在设置中修改。
 
 | 平台 | 下载 | 默认快速记录快捷键 |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.3/Aside-1.1.3-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.3/Aside-1.1.3-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.4/Aside-1.1.4-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.4/Aside-1.1.4-Windows-x64.exe) | Ctrl + Alt + Space |
 
 > [!WARNING]
 > ### Mac 用户安装步骤（必读）
