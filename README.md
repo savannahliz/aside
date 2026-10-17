@@ -14,14 +14,14 @@
 
 ## 快速上手
 
-1. 从 [v1.1.1 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.1) 下载适合你系统的安装包。源码压缩包不能直接运行。
+1. 从 [v1.1.2 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.2) 下载适合你系统的安装包。源码压缩包不能直接运行。
 2. 启动 Aside。在任何应用中按快速记录快捷键，屏幕中央会出现输入条。
 3. 输入内容并按 **Enter**：输入条消失，内容进入 Inbox；按 **Esc** 可取消。快捷键和保存键均可在设置中修改。
 
 | 平台 | 下载 | 默认快速记录快捷键 |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [下载 DMG](https://github.com/savannahliz/aside/releases/download/v1.1.2/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [下载 EXE](https://github.com/savannahliz/aside/releases/download/v1.1.2/Aside-1.1.2-Windows-x64.exe) | Ctrl + Alt + Space |
 
 Mac：打开 DMG，把 `Aside.app` 拖进“应用程序”；它常驻顶部菜单栏，不显示在 Dock。Windows：双击 `Aside.exe`，无需另装 .NET；应用可从系统托盘找到。
 
@@ -63,7 +63,7 @@ Mac：打开 DMG，把 `Aside.app` 拖进“应用程序”；它常驻顶部菜
 
 路径中的 `QuietPin` 为兼容旧用户数据而保留。Mac 外观和窗口设置由系统 UserDefaults 保存；Windows 设置与记录保存在同一文件。备份前请先退出应用，再复制对应文件。当前没有跨设备同步，Mac 与 Windows 的数据文件也不能直接互相覆盖。
 
-macOS 的数据模型、颜色收藏、窗口形态、贴边行为和快速输入有自动测试。Windows 已通过交叉编译与数据模型测试，**尚未在 Windows 真机验证**界面、全局快捷键、多显示器与登录启动；Intel Mac、全屏应用和多个桌面也未逐一实机验证。
+macOS 的数据模型、颜色收藏、窗口形态、贴边行为和快速输入有自动测试。Windows 已通过交叉编译与数据模型测试，并在 Windows 11 虚拟机（ARM，x64 转译运行）中实测了界面、拖动与缩放、快速输入、全局快捷键和贴边；**尚未在 x64 实体机上验证**多显示器与登录启动；Intel Mac、全屏应用和多个桌面也未逐一实机验证。
 
 ## 从源码构建
 

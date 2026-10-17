@@ -14,14 +14,14 @@ It is a small desktop Inbox, not a wall of separate sticky-note windows. Every t
 
 ## Get started
 
-1. Download the installer for your system from [v1.1.1 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.1). The source archives are not runnable apps.
+1. Download the installer for your system from [v1.1.2 Releases](https://github.com/savannahliz/aside/releases/tag/v1.1.2). The source archives are not runnable apps.
 2. Launch Aside. Press the capture shortcut from any app to bring up the centered input bar.
 3. Type and press **Enter**. The bar disappears and the item lands in Inbox. Press **Esc** to cancel. You can change the capture shortcut and submit key in Settings.
 
 | Platform | Download | Default capture shortcut |
 | --- | --- | --- |
-| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
-| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.1/Aside-1.1.1-Windows-x64.exe) | Ctrl + Alt + Space |
+| macOS 13+ · Apple Silicon / Intel | [Download DMG](https://github.com/savannahliz/aside/releases/download/v1.1.2/Aside-1.1.1-macOS-universal.dmg) | Option + Space |
+| Windows 10/11 · x64 | [Download EXE](https://github.com/savannahliz/aside/releases/download/v1.1.2/Aside-1.1.2-Windows-x64.exe) | Ctrl + Alt + Space |
 
 On Mac, open the DMG and drag `Aside.app` into Applications. It lives in the menu bar, not the Dock. On Windows, run `Aside.exe`; no separate .NET installation is needed. You can find it in the system tray.
 
@@ -63,7 +63,7 @@ Quit the old app before launching Aside. Internal data locations and stable iden
 
 The `QuietPin` directory name remains for compatibility. On Mac, appearance and window settings are stored in UserDefaults; on Windows, settings and notes share the same file. Quit the app before copying a data file for backup. There is no cross-device sync, and Mac and Windows data files cannot be swapped directly.
 
-Automated macOS tests cover the data model, saved colors, window modes, screen-edge behavior, and quick capture. The Windows build has passed cross-compilation and data-model tests, but its UI, global shortcut, multi-monitor behavior, and launch-on-login have **not yet been tested on a physical Windows machine**. Intel Mac, full-screen apps, and multiple desktops have not all been tested individually either.
+Automated macOS tests cover the data model, saved colors, window modes, screen-edge behavior, and quick capture. The Windows build has passed cross-compilation and data-model tests, and its UI, dragging and resizing, quick capture, global shortcut, and screen-edge docking were tested in a Windows 11 VM (ARM, running the x64 build under emulation). Multi-monitor behavior and launch-on-login have **not yet been tested on a physical x64 machine**. Intel Mac, full-screen apps, and multiple desktops have not all been tested individually either.
 
 ## Build from source
 
