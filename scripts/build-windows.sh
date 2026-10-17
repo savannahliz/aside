@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-build_label="${ASIDE_BUILD_LABEL:-1.1.1}"
+build_label="${ASIDE_BUILD_LABEL:-1.1.2}"
 output_dir="dist/windows-x64-${build_label}"
 dotnet_bin="${DOTNET_BIN:-.tools/dotnet/dotnet}"
 if [ ! -x "$dotnet_bin" ]; then dotnet_bin="$(command -v dotnet)"; fi

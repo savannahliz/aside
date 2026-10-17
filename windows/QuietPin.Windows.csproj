@@ -8,15 +8,18 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <AssemblyName>Aside</AssemblyName>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>../assets/Aside.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- Precompile to native code so first use of each window does not wait on the JIT. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>none</DebugType>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(AsidePerf)' == 'true'"><DefineConstants>$(DefineConstants);PERF</DefineConstants></PropertyGroup>
   <ItemGroup><Compile Remove="Tests/**/*.cs" /></ItemGroup>
   <ItemGroup><Resource Include="../assets/GitHub_Invertocat_Black.png" Link="assets/GitHub_Invertocat_Black.png" /></ItemGroup>
 </Project>

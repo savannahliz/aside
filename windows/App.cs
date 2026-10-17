@@ -28,7 +28,12 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr hwnd);
     [DllImport("user32.dll")] internal static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
     [DllImport("gdi32.dll")] internal static extern uint GetPixel(IntPtr dc, int x, int y);
+    [DllImport("user32.dll")] internal static extern IntPtr MonitorFromPoint(POINT point, uint flags);
+    [DllImport("shcore.dll")] internal static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+    [DllImport("user32.dll")] internal static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [StructLayout(LayoutKind.Sequential)] internal struct POINT { public int X; public int Y; }
+    [StructLayout(LayoutKind.Sequential)] internal struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 
 public sealed class App : Application
@@ -67,27 +72,38 @@ public sealed class App : Application
             RegisterShortcut();
         };
         Inbox.Show();
-        tray = new Forms.NotifyIcon { Text = "Aside · Capture it. Stay in flow.", Icon = System.Drawing.SystemIcons.Information, Visible = true };
+        // Build the capture window up front, as macOS does, so the first hotkey press does not pay for window creation.
+        capture = new CaptureWindow(this);
+        new WindowInteropHelper(capture).EnsureHandle();
+        System.Drawing.Icon trayIcon;
+        try { trayIcon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? System.Drawing.SystemIcons.Application; }
+        catch { trayIcon = System.Drawing.SystemIcons.Application; }
+        tray = new Forms.NotifyIcon { Text = "Aside · Capture it. Stay in flow.", Icon = trayIcon, Visible = true };
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("显示 Inbox", null, (_, _) => Dispatcher.Invoke(ShowInbox));
-        menu.Items.Add("快速记录", null, (_, _) => Dispatcher.Invoke(ToggleCapture));
+        var captureMenu = menu.Items.Add("快速记录", null, (_, _) => Dispatcher.Invoke(ToggleCapture));
         var pinsMenu = menu.Items.Add("仅显示置顶事项", null, (_, _) => Dispatcher.Invoke(() => { Inbox.Show(); Inbox.ChangeMode(true, false); }));
         var stripMenu = menu.Items.Add("收为细条", null, (_, _) => Dispatcher.Invoke(() => { Inbox.Show(); Inbox.ChangeMode(true, true); }));
-        menu.Items.Add("隐藏窗口", null, (_, _) => Dispatcher.Invoke(Inbox.HideToTray));
+        var hideMenu = menu.Items.Add("最小化到系统托盘", null, (_, _) => Dispatcher.Invoke(Inbox.HideToTray));
         var topMenu = new Forms.ToolStripMenuItem("窗口置顶");
         topMenu.Click += (_, _) => Dispatcher.Invoke(() => Commit(b => b.Preferences.Topmost = !b.Preferences.Topmost));
         menu.Items.Add(topMenu);
         menu.Opening += (_, _) =>
         {
+            var p = Store.Book.Preferences;
+            captureMenu.Text = "快速记录    " + (p.CustomKeyLabel ?? ShortcutLabels[Math.Clamp(p.Shortcut, 0, 2)]);
+            hideMenu.Enabled = Inbox.IsVisible || Inbox.EdgeHandleVisible;
             topMenu.Checked = Store.Book.Preferences.Topmost;
             ((Forms.ToolStripMenuItem)pinsMenu).Checked = Store.Book.Preferences.Collapsed && !Store.Book.Preferences.StripMode;
             ((Forms.ToolStripMenuItem)stripMenu).Checked = Store.Book.Preferences.StripMode;
         };
-        menu.Items.Add("设置", null, (_, _) => Dispatcher.Invoke(ShowSettings));
+        menu.Items.Add("设置…", null, (_, _) => Dispatcher.Invoke(ShowSettings));
         menu.Items.Add("退出 Aside", null, (_, _) => Dispatcher.Invoke(() => { Quitting = true; Shutdown(); }));
         tray.ContextMenuStrip = menu;
-        tray.DoubleClick += (_, _) => Dispatcher.Invoke(ShowInbox);
+        tray.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) Dispatcher.Invoke(ShowInbox); };
         if (Store.LoadError != null) MessageBox.Show(Store.LoadError, "Aside 记录载入失败");
+        Perf.Log($"start: {(DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds:F0} ms to ready; OS {Environment.OSVersion.Version}, " +
+            $"{RuntimeInformation.OSArchitecture} OS / {RuntimeInformation.ProcessArchitecture} process, render tier {RenderCapability.Tier >> 16}, animations {SystemParameters.ClientAreaAnimation}");
     }
 
     internal bool Commit(Action<Notebook> action, bool render = true)
@@ -106,17 +122,23 @@ public sealed class App : Application
     {
         if (closingCapture) { reopenCapture = true; return; }
         if (capture?.IsVisible == true) { CloseCapture(); return; }
+        var started = Perf.Start();
         previousWindow = Native.GetForegroundWindow();
         capture ??= new CaptureWindow(this);
         capture.PositionAtCursor(); capture.PrepareEntrance(); capture.Show(); capture.Activate(); capture.FocusInput(); capture.AnimateIn();
+        Perf.Log($"capture open: shown after {Perf.Ms(started)} ms");
+        capture.LogPlacement();
+        Perf.Frames("capture open", started, 200);
     }
     internal void CloseCapture(bool restoreFocus = true)
     {
         if (closingCapture || capture?.IsVisible != true) return;
         closingCapture = true;
+        var started = Perf.Start();
         capture.AnimateOut(() =>
         {
             capture.Hide();
+            Perf.Log($"capture close: hidden after {Perf.Ms(started)} ms");
             if (restoreFocus && previousWindow != IntPtr.Zero) Native.SetForegroundWindow(previousWindow);
             previousWindow = IntPtr.Zero;
             closingCapture = false;
@@ -135,7 +157,7 @@ public sealed class App : Application
     }
     private IntPtr WindowMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (message == 0x0312 && wParam.ToInt32() == 1) { ToggleCapture(); handled = true; }
+        if (message == 0x0312 && wParam.ToInt32() == 1) { Perf.Log("hotkey received"); ToggleCapture(); handled = true; }
         return IntPtr.Zero;
     }
     internal Guid? ChooseReplacement(Window owner)
@@ -178,6 +200,57 @@ public sealed class App : Application
     }
 }
 
+// Spring curves matching the macOS build. Use with EasingMode.EaseIn so the curve applies as written.
+internal sealed class SpringEase : EasingFunctionBase
+{
+    private readonly double response, damping, seconds;
+    // The macOS edge reveal curve, 1 - e^(-9t)·cos(8t): ~70% of the distance in the first tenth of the
+    // duration, which is what makes the note snap out instead of gliding.
+    public SpringEase() { }
+    // SwiftUI .spring(response:dampingFraction:) sampled over an animation lasting `seconds`.
+    public SpringEase(double response, double damping, double seconds) { this.response = response; this.damping = damping; this.seconds = seconds; }
+    protected override double EaseInCore(double t)
+    {
+        if (t >= 1) return 1;
+        if (response <= 0) return 1 - Math.Exp(-9 * t) * Math.Cos(8 * t);
+        var time = t * seconds; var omega = 2 * Math.PI / response;
+        var decay = damping * omega; var ring = omega * Math.Sqrt(1 - damping * damping);
+        return 1 - Math.Exp(-decay * time) * (Math.Cos(ring * time) + decay / ring * Math.Sin(ring * time));
+    }
+    protected override Freezable CreateInstanceCore() => new SpringEase(response, damping, seconds);
+}
+
+// Timing log for test builds only (built with -p:AsidePerf=true); calls compile away otherwise.
+internal static class Perf
+{
+    [Conditional("PERF")]
+    internal static void Log(string message)
+    {
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "aside-perf.log");
+            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
+        }
+        catch { }
+    }
+    internal static long Start() => Stopwatch.GetTimestamp();
+    internal static long Ms(long start) => (Stopwatch.GetTimestamp() - start) * 1000 / Stopwatch.Frequency;
+    // Logs when the first frame is rendered and how many frames render during the next window of time.
+    [Conditional("PERF")]
+    internal static void Frames(string label, long start, int windowMs)
+    {
+        var frames = 0; long first = -1;
+        EventHandler? tick = null;
+        tick = (_, _) =>
+        {
+            if (first < 0) first = Ms(start);
+            frames++;
+            if (Ms(start) >= windowMs) { CompositionTarget.Rendering -= tick; Log($"{label}: first frame {first} ms, {frames} frames in {Ms(start)} ms"); }
+        };
+        CompositionTarget.Rendering += tick;
+    }
+}
+
 internal static class UI
 {
     internal static TextBlock Text(string text, double size = 13) => new()
@@ -191,6 +264,74 @@ internal static class UI
         System.Windows.Automation.AutomationProperties.SetName(button, title);
         return button;
     }
+    // Segoe Fluent Icons ships with Windows 11; Segoe MDL2 Assets covers Windows 10 with the same code points.
+    internal static readonly FontFamily IconFont = new("Segoe Fluent Icons, Segoe MDL2 Assets");
+    internal static TextBlock Glyph(string glyph, double size = 12) => new()
+    {
+        Text = glyph, FontFamily = IconFont, FontSize = size,
+        HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+    };
+    // Borderless button matching the macOS plain icon buttons; Foreground inherits from the window.
+    internal static Button Flat(object content, string label, Action action, double width = 26, double height = 26)
+    {
+        var chrome = new FrameworkElementFactory(typeof(Border), "chrome");
+        chrome.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        chrome.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        chrome.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = chrome };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(30, 128, 128, 128)), "chrome"));
+        template.Triggers.Add(hover);
+        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, .35));
+        template.Triggers.Add(disabled);
+        var button = new Button
+        {
+            Content = content, OverridesDefaultStyle = true, Template = template, Focusable = false,
+            MinWidth = width, Height = height, Cursor = Cursors.Hand, ToolTip = label, VerticalAlignment = VerticalAlignment.Center
+        };
+        button.Click += (_, _) => action();
+        System.Windows.Automation.AutomationProperties.SetName(button, label);
+        return button;
+    }
+    internal static Button Icon(string glyph, string label, Action action, double size = 12) => Flat(Glyph(glyph, size), label, action);
+    // Light bordered button for the settings window, close to a macOS rounded push button.
+    internal static Button Pill(string text, Action action)
+    {
+        var chrome = new FrameworkElementFactory(typeof(Border), "chrome");
+        chrome.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(252, 252, 252)));
+        chrome.SetValue(Border.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(212, 212, 212)));
+        chrome.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        chrome.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        chrome.SetValue(Border.PaddingProperty, new Thickness(11, 3, 11, 4));
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        presenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        chrome.AppendChild(presenter);
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = chrome };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(240, 240, 240)), "chrome"));
+        template.Triggers.Add(hover);
+        var pressed = new Trigger { Property = System.Windows.Controls.Primitives.ButtonBase.IsPressedProperty, Value = true };
+        pressed.Setters.Add(new Setter(Border.BackgroundProperty, new SolidColorBrush(Color.FromRgb(228, 228, 228)), "chrome"));
+        template.Triggers.Add(pressed);
+        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, .4));
+        template.Triggers.Add(disabled);
+        var button = new Button
+        {
+            Content = text, OverridesDefaultStyle = true, Template = template, Cursor = Cursors.Hand,
+            FontSize = 12, MinHeight = 26, MinWidth = 28, VerticalAlignment = VerticalAlignment.Center
+        };
+        button.Click += (_, _) => action();
+        System.Windows.Automation.AutomationProperties.SetName(button, text);
+        return button;
+    }
+    internal static Brush Muted(Brush foreground) =>
+        foreground is SolidColorBrush solid ? new SolidColorBrush(Color.FromArgb(150, solid.Color.R, solid.Color.G, solid.Color.B)) : Brushes.Gray;
     internal static Window Dialog(string title, double width, double height, Window? owner = null) => new()
     {
         Title = title, Width = width, Height = height, Owner = owner, Topmost = true,
@@ -208,13 +349,17 @@ internal static class UI
 internal sealed class MainWindow : Window
 {
     private readonly App app;
-    private readonly Border surface = new() { CornerRadius = new CornerRadius(14), BorderThickness = new Thickness(1), Padding = new Thickness(12) };
-    private readonly TextBox input = new() { FontSize = 14, MinWidth = 80, Padding = new Thickness(7), BorderThickness = new Thickness(0) };
-    private readonly CheckBox pinInput = new() { Content = "Pin", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5) };
+    private readonly Border surface = new() { CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1) };
+    private readonly TextBox input = new() { FontSize = 14, MinWidth = 80, Padding = new Thickness(2, 4, 2, 4), BorderThickness = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock inputPlaceholder = new() { Text = "记下一件事…", FontSize = 14, Margin = new Thickness(4, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
+    private readonly Grid inputArea = new();
+    private Button? saveInput;
+    private bool pinDraft;
     private readonly DispatcherTimer frameTimer = new() { Interval = TimeSpan.FromMilliseconds(350) };
     private bool resizingMode;
     private bool showDone;
     private StackPanel? compactControls;
+    private Brush muted = Brushes.Gray;
     private readonly DispatcherTimer edgeTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
     private readonly Window edgeHandle = new()
     {
@@ -235,16 +380,34 @@ internal sealed class MainWindow : Window
         this.app = app;
         Title = "Aside Inbox"; FontFamily = new FontFamily("Microsoft YaHei UI");
         WindowStyle = WindowStyle.None; AllowsTransparency = true; Background = Brushes.Transparent;
-        ResizeMode = ResizeMode.CanResizeWithGrip; ShowInTaskbar = false; MinWidth = 290;
+        ResizeMode = ResizeMode.CanResize; ShowInTaskbar = false; MinWidth = 290;
+        // A borderless window has no resize frame; WindowChrome restores edge and corner resizing like macOS.
+        System.Windows.Shell.WindowChrome.SetWindowChrome(this, new System.Windows.Shell.WindowChrome
+        {
+            CaptionHeight = 0, ResizeBorderThickness = new Thickness(6), GlassFrameThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(0), UseAeroCaptionButtons = false
+        });
         var p = app.Store.Book.Preferences;
         SetSizeLimits();
         Width = p.StripMode ? p.StripWidth : (p.Collapsed ? p.CompactWidth : p.ExpandedWidth);
         Height = p.StripMode ? 30 : (p.Collapsed ? p.CompactHeight : p.ExpandedHeight);
         Left = p.Left; Top = p.Top;
         Content = surface;
+        inputArea.Children.Add(input); inputArea.Children.Add(inputPlaceholder);
         input.KeyDown += (_, e) => { if (e.Key == Key.Enter) { SaveInput(); e.Handled = true; } };
-        MouseEnter += (_, _) => { if (compactControls != null) compactControls.Opacity = 1; Fade(); };
-        MouseLeave += (_, _) => { finishInlineEdit?.Invoke(); if (compactControls != null) compactControls.Opacity = 0; Fade(); };
+        input.TextChanged += (_, _) =>
+        {
+            inputPlaceholder.Visibility = input.Text.Length == 0 ? Visibility.Visible : Visibility.Hidden;
+            if (saveInput != null) saveInput.IsEnabled = !string.IsNullOrWhiteSpace(input.Text);
+        };
+        // Like isMovableByWindowBackground on macOS: any click that no control handled drags the window.
+        surface.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ClickCount != 1 || Mouse.LeftButton != MouseButtonState.Pressed) return;
+            e.Handled = true; DragWindow();
+        };
+        MouseEnter += (_, _) => { ShowCompactControls(true); Fade(); };
+        MouseLeave += (_, _) => { finishInlineEdit?.Invoke(); ShowCompactControls(false); Fade(); };
         Activated += (_, _) => Fade(); Deactivated += (_, _) => Fade();
         LocationChanged += (_, _) => { if (!resizingMode && Mouse.LeftButton == MouseButtonState.Pressed) userDragging = true; ScheduleFrame(); };
         SizeChanged += (_, _) => ScheduleFrame();
@@ -269,76 +432,135 @@ internal sealed class MainWindow : Window
         edgeHandle.Background = new SolidColorBrush(color);
         var dark = color.R * .2126 + color.G * .7152 + color.B * .0722 < 115;
         Foreground = dark ? Brushes.WhiteSmoke : new SolidColorBrush(Color.FromRgb(45, 49, 44));
+        muted = UI.Muted(Foreground);
         surface.Background = new SolidColorBrush(color);
-        surface.BorderBrush = new SolidColorBrush(Color.FromArgb(35, 100, 100, 100));
-        input.Foreground = Foreground; input.Background = Brushes.Transparent;
-        surface.Padding = p.StripMode ? new Thickness(8, 0, 8, 0) : new Thickness(12);
+        surface.BorderBrush = new SolidColorBrush(dark ? Color.FromArgb(40, 255, 255, 255) : Color.FromArgb(26, 0, 0, 0));
+        input.Foreground = Foreground; input.CaretBrush = Foreground; input.Background = Brushes.Transparent;
+        inputPlaceholder.Foreground = muted;
+        surface.Padding = p.StripMode ? new Thickness(10, 0, 6, 0) : new Thickness(0);
         if (p.StripMode)
         {
             var strip = new DockPanel { Background = Brushes.Transparent };
-            var expand = new Button { Content = "↗", Width = 24, Height = 22, Padding = new Thickness(0), BorderThickness = new Thickness(0), Background = Brushes.Transparent, Foreground = Foreground, ToolTip = "展开 Inbox" };
-            expand.Click += (_, _) => Expand(); DockPanel.SetDock(expand, Dock.Right); strip.Children.Add(expand);
-            var grip = UI.Text("≡", 12); grip.VerticalAlignment = VerticalAlignment.Center; strip.Children.Add(grip);
-            strip.MouseLeftButtonDown += (_, e) => { if (e.ClickCount == 2) Expand(); else if (e.Source == strip || e.Source == grip) DragWindow(); };
+            var expand = UI.Icon("", "展开 Inbox", Expand, 10);
+            DockPanel.SetDock(expand, Dock.Right); strip.Children.Add(expand);
+            var grip = UI.Glyph("", 9); grip.Foreground = muted; grip.HorizontalAlignment = HorizontalAlignment.Left;
+            strip.Children.Add(grip);
+            strip.MouseLeftButtonDown += (_, e) => { if (e.ClickCount == 2) { Expand(); e.Handled = true; } };
             surface.Child = strip; Fade(); return;
         }
         var root = new DockPanel();
-        var header = new DockPanel { LastChildFill = true, Background = Brushes.Transparent, MinHeight = 26 };
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        var topmost = UI.Button(p.Topmost ? "▣" : "▢", () => app.Commit(b => b.Preferences.Topmost = !b.Preferences.Topmost));
-        topmost.ToolTip = p.Topmost ? "取消 Inbox 窗口置顶" : "开启 Inbox 窗口置顶";
-        System.Windows.Automation.AutomationProperties.SetName(topmost, (string)topmost.ToolTip);
-        controls.Children.Add(topmost);
-        var minimize = UI.Button("−", HideToTray);
-        minimize.ToolTip = "最小化到系统托盘";
-        System.Windows.Automation.AutomationProperties.SetName(minimize, (string)minimize.ToolTip);
-        controls.Children.Add(minimize);
-        controls.Children.Add(UI.Button("⚙", app.ShowSettings));
-        controls.Children.Add(UI.Button(p.Collapsed ? "━" : "↙", ToggleMode));
-        if (p.Collapsed) controls.Children.Add(UI.Button("↗", Expand));
-        DockPanel.SetDock(controls, Dock.Right); header.Children.Add(controls);
-        if (!p.Collapsed) header.Children.Add(UI.Text($"Inbox  ·  {app.Store.Book.Pins.Length}/{p.PinCapacity}", 17));
-        compactControls = p.Collapsed ? controls : null;
-        if (compactControls != null) compactControls.Opacity = IsMouseOver ? 1 : 0;
-        header.MouseLeftButtonDown += (_, e) => { if (e.Source == header || e.Source is TextBlock) DragWindow(); };
-        DockPanel.SetDock(header, Dock.Top); root.Children.Add(header);
         if (!p.Collapsed)
         {
-            // Detach retained input controls before moving them to the new footer.
-            if (input.Parent is Panel oldInput) oldInput.Children.Remove(input);
-            if (pinInput.Parent is Panel oldPin) oldPin.Children.Remove(pinInput);
-            var footer = new DockPanel { Margin = new Thickness(0, 8, 0, 3) };
-            var save = UI.Button("↵", SaveInput);
-            DockPanel.SetDock(save, Dock.Right); footer.Children.Add(save);
-            DockPanel.SetDock(pinInput, Dock.Right); footer.Children.Add(pinInput);
-            footer.Children.Add(input); DockPanel.SetDock(footer, Dock.Bottom); root.Children.Add(footer);
+            var header = new DockPanel { Margin = new Thickness(18, 14, 12, 10), Background = Brushes.Transparent };
+            var controls = HeaderControls(p);
+            DockPanel.SetDock(controls, Dock.Right); header.Children.Add(controls);
+            var pinCount = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) };
+            var pinGlyph = UI.Glyph("", 10); pinGlyph.Foreground = muted; pinCount.Children.Add(pinGlyph);
+            pinCount.Children.Add(new TextBlock { Text = $" {app.Store.Book.Pins.Length}/{p.PinCapacity}", FontSize = 11, FontWeight = FontWeights.Medium, Foreground = muted, VerticalAlignment = VerticalAlignment.Center });
+            DockPanel.SetDock(pinCount, Dock.Right); header.Children.Add(pinCount);
+            var title = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            title.Children.Add(new TextBlock { Text = "Inbox", FontSize = 19, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+            var open = app.Store.Book.Items.Count(i => !i.Completed);
+            title.Children.Add(new TextBlock { Text = open.ToString(), FontSize = 11, FontFamily = new FontFamily("Consolas"), Foreground = muted, Margin = new Thickness(6, 4, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            header.Children.Add(title);
+            DockPanel.SetDock(header, Dock.Top); root.Children.Add(header);
+            var topDivider = Divider(); DockPanel.SetDock(topDivider, Dock.Top); root.Children.Add(topDivider);
+
+            // Detach the retained input area before moving it to the new footer.
+            if (inputArea.Parent is Panel oldInput) oldInput.Children.Remove(inputArea);
+            var footer = new DockPanel { Margin = new Thickness(18, 9, 18, 11) };
+            var plus = UI.Glyph("", 12); plus.Foreground = muted; plus.Margin = new Thickness(0, 0, 8, 0);
+            DockPanel.SetDock(plus, Dock.Left); footer.Children.Add(plus);
+            saveInput = UI.Icon("", "保存事项", SaveInput);
+            saveInput.IsEnabled = !string.IsNullOrWhiteSpace(input.Text);
+            DockPanel.SetDock(saveInput, Dock.Right); footer.Children.Add(saveInput);
+            var pinToggle = UI.Icon(pinDraft ? "" : "", pinDraft ? "取消新事项置顶" : "新事项直接置顶", () => { pinDraft = !pinDraft; Render(); input.Focus(); });
+            DockPanel.SetDock(pinToggle, Dock.Right); footer.Children.Add(pinToggle);
+            footer.Children.Add(inputArea);
+            DockPanel.SetDock(footer, Dock.Bottom); root.Children.Add(footer);
+            var bottomDivider = Divider(); DockPanel.SetDock(bottomDivider, Dock.Bottom); root.Children.Add(bottomDivider);
         }
-        var rows = new StackPanel();
+        var rows = new StackPanel
+        {
+            Margin = p.Collapsed ? new Thickness(12, 25, 12, 12) : new Thickness(10, 10, 10, 12),
+            Background = Brushes.Transparent
+        };
         foreach (var item in app.Store.Book.Pins) rows.Children.Add(Row(item));
         if (!p.Collapsed)
         {
             var normal = app.Store.Book.Items.Where(i => !i.Pinned && !i.Completed).OrderByDescending(i => i.CreatedAt).ToArray();
-            if (app.Store.Book.Pins.Length > 0 && normal.Length > 0) rows.Children.Add(new Separator { Margin = new Thickness(5, 8, 5, 8) });
+            if (app.Store.Book.Pins.Length > 0 && normal.Length > 0) { var gap = Divider(); gap.Margin = new Thickness(8, 9, 8, 9); rows.Children.Add(gap); }
             foreach (var item in normal) rows.Children.Add(Row(item));
             if (normal.Length + app.Store.Book.Pins.Length == 0)
-                rows.Children.Add(UI.Text("想到就记，记完就走。\n\n随手记入 Inbox，把最想看见的事项 Pin 在这里。", 14));
-            var done = app.Store.Book.Items.Where(i => i.Completed).ToArray();
+            {
+                var empty = new StackPanel { Margin = new Thickness(10, 32, 10, 32) };
+                empty.Children.Add(new TextBlock { Text = "想到就记，记完就走。", FontSize = 15, FontWeight = FontWeights.Medium, Margin = new Thickness(0, 0, 0, 9) });
+                empty.Children.Add(new TextBlock { Text = "随手记入 Inbox，把最想看见的事项 Pin 在这里。", FontSize = 12, Foreground = muted, TextWrapping = TextWrapping.Wrap, LineHeight = 19 });
+                rows.Children.Add(empty);
+            }
+            var done = app.Store.Book.Items.Where(i => i.Completed).OrderByDescending(i => i.CreatedAt).ToArray();
             if (done.Length > 0)
             {
                 var doneRows = new StackPanel(); foreach (var item in done) doneRows.Children.Add(Row(item));
                 var doneHeader = new StackPanel { Orientation = Orientation.Horizontal };
-                doneHeader.Children.Add(UI.Text($"已完成 · {done.Length}", 11));
-                var clearDone = UI.Button("清空", RequestClearCompleted);
-                System.Windows.Automation.AutomationProperties.SetName(clearDone, "清空已完成事项");
-                doneHeader.Children.Add(clearDone);
-                var expander = new Expander { Header = doneHeader, Content = doneRows, IsExpanded = showDone, Margin = new Thickness(4, 10, 4, 4) };
+                doneHeader.Children.Add(new TextBlock { Text = $"已完成 · {done.Length}", FontSize = 11, Foreground = muted, VerticalAlignment = VerticalAlignment.Center });
+                var clearDone = UI.Flat(new TextBlock { Text = "清空", FontSize = 11, Foreground = muted }, "清空已完成事项", RequestClearCompleted, 34, 22);
+                clearDone.Margin = new Thickness(10, 0, 0, 0); doneHeader.Children.Add(clearDone);
+                var expander = new Expander { Header = doneHeader, Content = doneRows, IsExpanded = showDone, Foreground = Foreground, Margin = new Thickness(7, 15, 7, 4) };
                 expander.Expanded += (_, _) => showDone = true; expander.Collapsed += (_, _) => showDone = false;
                 rows.Children.Add(expander);
             }
         }
-        else if (app.Store.Book.Pins.Length == 0) rows.Children.Add(UI.Text("暂无置顶事项"));
-        root.Children.Add(new ScrollViewer { Content = rows, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
-        surface.Child = root; Fade();
+        else if (app.Store.Book.Pins.Length == 0)
+            rows.Children.Add(new TextBlock { Text = "暂无置顶事项", FontSize = 13, Foreground = muted, Margin = new Thickness(10, 12, 10, 12) });
+        // A focusable ScrollViewer swallows mouse-down, which would block background dragging.
+        root.Children.Add(new ScrollViewer { Content = rows, Focusable = false, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
+        compactControls = null;
+        if (p.Collapsed)
+        {
+            var layers = new Grid();
+            layers.Children.Add(root);
+            compactControls = HeaderControls(p);
+            compactControls.HorizontalAlignment = HorizontalAlignment.Right; compactControls.VerticalAlignment = VerticalAlignment.Top;
+            compactControls.Margin = new Thickness(0, 1, 8, 0);
+            layers.Children.Add(compactControls);
+            ShowCompactControls(IsMouseOver);
+            surface.Child = layers;
+        }
+        else surface.Child = root;
+        Fade();
+    }
+
+    private StackPanel HeaderControls(Preferences p)
+    {
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var size = p.Collapsed ? 10 : 12;
+        var topmost = UI.Icon("", p.Topmost ? "取消 Inbox 窗口置顶" : "开启 Inbox 窗口置顶",
+            () => app.Commit(b => b.Preferences.Topmost = !b.Preferences.Topmost), size);
+        topmost.Opacity = p.Topmost ? 1 : .45;
+        controls.Children.Add(topmost);
+        controls.Children.Add(UI.Icon("", "最小化到系统托盘", HideToTray, size));
+        controls.Children.Add(UI.Icon("", "设置", app.ShowSettings, size));
+        if (p.Collapsed)
+        {
+            controls.Children.Add(UI.Icon("", "收为细条", ToggleMode, size));
+            controls.Children.Add(UI.Icon("", "展开 Inbox", Expand, size));
+        }
+        else controls.Children.Add(UI.Icon("", "仅显示置顶事项", ToggleMode, size));
+        return controls;
+    }
+
+    private Border Divider() => new()
+    {
+        Height = 1, Margin = new Thickness(18, 0, 18, 0),
+        Background = Foreground is SolidColorBrush fg ? new SolidColorBrush(Color.FromArgb(30, fg.Color.R, fg.Color.G, fg.Color.B)) : Brushes.LightGray
+    };
+
+    private void ShowCompactControls(bool visible)
+    {
+        if (compactControls == null) return;
+        compactControls.Opacity = visible ? 1 : 0;
+        compactControls.IsHitTestVisible = visible;
     }
 
     private void RequestClearCompleted()
@@ -367,34 +589,46 @@ internal sealed class MainWindow : Window
 
     private FrameworkElement Row(Item item)
     {
-        var row = new DockPanel { Margin = new Thickness(0, 4, 0, 4), Background = Brushes.Transparent };
-        var complete = UI.Button(item.Completed ? "✓" : "○", () => app.Commit(b => b.Complete(item.Id)));
-        complete.ToolTip = item.Completed ? "恢复事项" : "标记完成";
+        var row = new DockPanel { Background = Brushes.Transparent };
+        var shell = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(6, 5, 6, 5), Background = Brushes.Transparent, Child = row };
+        var complete = UI.Icon(item.Completed ? "" : "", item.Completed ? "恢复事项" : "标记完成", () => app.Commit(b => b.Complete(item.Id)), 14);
+        complete.Foreground = muted; complete.MinWidth = 22; complete.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(complete, Dock.Left); row.Children.Add(complete);
+        Button? pin = null;
         if (!item.Completed)
         {
-            var pin = UI.Button(item.Pinned ? "●" : "Pin", () =>
-            {
-                if (item.Pinned) app.Commit(b => b.Unpin(item.Id));
-                else
-                {
-                    var replacement = app.Store.Book.Pins.Length >= app.Store.Book.Preferences.PinCapacity ? app.ChooseReplacement(this) : null;
-                    if (app.Store.Book.Pins.Length < app.Store.Book.Preferences.PinCapacity || replacement.HasValue) app.Commit(b => b.Pin(item.Id, replacement));
-                }
-            });
-            pin.ToolTip = item.Pinned ? "取消置顶" : "置顶";
+            pin = UI.Icon(item.Pinned ? "" : "", item.Pinned ? "取消置顶" : "置顶", () => RequestPin(item), 11);
+            pin.Foreground = muted; pin.VerticalAlignment = VerticalAlignment.Top;
+            pin.Opacity = item.Pinned ? 1 : 0;
             DockPanel.SetDock(pin, Dock.Right); row.Children.Add(pin);
         }
-        var text = UI.Text(item.Content); text.VerticalAlignment = VerticalAlignment.Center;
-        text.Cursor = Cursors.Hand;
-        text.ToolTip = "点击修改事项";
+        var text = new TextBlock
+        {
+            Text = item.Content, FontSize = 13, TextWrapping = TextWrapping.Wrap, LineHeight = 19,
+            FontWeight = item.Pinned ? FontWeights.Medium : FontWeights.Normal,
+            Margin = new Thickness(5, 3, 4, 3), VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.Hand, ToolTip = "点击修改事项", Background = Brushes.Transparent
+        };
         var dragging = false;
+        // Clicking the text edits it instead of dragging the window.
+        text.MouseLeftButtonDown += (_, e) => e.Handled = true;
         text.MouseLeftButtonUp += (_, e) => { if (e.ChangedButton == MouseButton.Left && !dragging) StartInlineEdit(item, row, text); };
-        if (item.Completed) { text.TextDecorations = TextDecorations.Strikethrough; text.Opacity = .55; }
+        if (item.Completed) { text.TextDecorations = TextDecorations.Strikethrough; text.Foreground = muted; }
         row.Children.Add(text);
+        var hoverFill = Foreground is SolidColorBrush fg ? new SolidColorBrush(Color.FromArgb(13, fg.Color.R, fg.Color.G, fg.Color.B)) : Brushes.Transparent;
+        shell.MouseEnter += (_, _) => { shell.Background = hoverFill; if (pin != null) pin.Opacity = 1; };
+        shell.MouseLeave += (_, _) => { shell.Background = Brushes.Transparent; if (pin != null && !item.Pinned) pin.Opacity = 0; };
         var context = new ContextMenu();
+        if (!item.Completed)
+        {
+            var pinItem = new MenuItem { Header = item.Pinned ? "取消置顶" : "置顶" }; pinItem.Click += (_, _) => RequestPin(item);
+            context.Items.Add(pinItem);
+        }
+        var completeItem = new MenuItem { Header = item.Completed ? "恢复事项" : "标记完成" }; completeItem.Click += (_, _) => app.Commit(b => b.Complete(item.Id));
+        context.Items.Add(completeItem);
+        context.Items.Add(new Separator());
         var remove = new MenuItem { Header = "删除" }; remove.Click += (_, _) => app.Commit(b => b.Delete(item.Id));
-        context.Items.Add(remove); row.ContextMenu = context;
+        context.Items.Add(remove); shell.ContextMenu = context;
         if (item.Pinned)
         {
             Point start = default;
@@ -408,11 +642,19 @@ internal sealed class MainWindow : Window
                     DragDrop.DoDragDrop(text, new DataObject("QuietPin.Item", item.Id.ToString()), DragDropEffects.Move);
                 }
             };
-            row.AllowDrop = true;
-            row.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent("QuietPin.Item") ? DragDropEffects.Move : DragDropEffects.None; e.Handled = true; };
-            row.Drop += (_, e) => { if (Guid.TryParse(e.Data.GetData("QuietPin.Item") as string, out var id)) app.Commit(b => b.Move(id, item.Id)); };
+            shell.AllowDrop = true;
+            shell.DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent("QuietPin.Item") ? DragDropEffects.Move : DragDropEffects.None; e.Handled = true; };
+            shell.Drop += (_, e) => { if (Guid.TryParse(e.Data.GetData("QuietPin.Item") as string, out var id)) app.Commit(b => b.Move(id, item.Id)); };
         }
-        return row;
+        return shell;
+    }
+
+    private void RequestPin(Item item)
+    {
+        if (item.Pinned) { app.Commit(b => b.Unpin(item.Id)); return; }
+        var full = app.Store.Book.Pins.Length >= app.Store.Book.Preferences.PinCapacity;
+        var replacement = full ? app.ChooseReplacement(this) : null;
+        if (!full || replacement.HasValue) app.Commit(b => b.Pin(item.Id, replacement));
     }
 
     private void StartInlineEdit(Item item, DockPanel row, TextBlock label)
@@ -445,7 +687,7 @@ internal sealed class MainWindow : Window
 
     private void SaveInput()
     {
-        if (app.Add(this, input.Text, pinInput.IsChecked == true)) { input.Clear(); pinInput.IsChecked = false; input.Focus(); }
+        if (app.Add(this, input.Text, pinDraft)) { input.Clear(); pinDraft = false; Render(); input.Focus(); }
     }
     internal void ToggleMode()
     {
@@ -460,7 +702,9 @@ internal sealed class MainWindow : Window
         MaxHeight = p.StripMode ? 30 : double.PositiveInfinity;
         MinHeight = p.StripMode ? 30 : (p.Collapsed ? 95 : 280);
         MinWidth = p.StripMode ? 160 : 290;
-        ResizeMode = p.StripMode ? ResizeMode.CanResize : ResizeMode.CanResizeWithGrip;
+        // The strip has a fixed height, so only its left and right edges resize.
+        var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
+        if (chrome != null) chrome.ResizeBorderThickness = p.StripMode ? new Thickness(6, 0, 6, 0) : new Thickness(6);
     }
     internal void ChangeMode(bool collapsed, bool strip)
     {
@@ -572,6 +816,7 @@ internal sealed class MainWindow : Window
         Left = currentLeft;
         resizingMode = true; frameTimer.Stop(); dockFrame = rest; dockHidden = true;
         edgeTransitioning = true; var token = ++edgeMotionToken;
+        var started = Perf.Start();
         // Swap windows instead of resizing the live transparent content to 8px.
         edgeHandle.Height = Math.Min(100, rest.Height);
         edgeHandle.Left = app.Store.Book.Preferences.DockEdge == "left" ? work.Left : work.Right - 8;
@@ -582,6 +827,7 @@ internal sealed class MainWindow : Window
             BeginAnimation(LeftProperty, null);
             Hide(); Left = rest.Left; edgeHandle.Show();
             edgeTransitioning = false; resizingMode = false; Fade();
+            Perf.Log($"edge hide: done after {Perf.Ms(started)} ms");
         }
         if (!animated || !SystemParameters.ClientAreaAnimation) { Finish(); return; }
         var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - Width + 8 : work.Right - 8;
@@ -597,6 +843,7 @@ internal sealed class MainWindow : Window
         var rest = dockFrame.Value; var work = WorkArea();
         resizingMode = true; dockHidden = false; edgeTransitioning = true;
         var token = ++edgeMotionToken;
+        var started = Perf.Start();
         BeginAnimation(LeftProperty, null);
         var parked = app.Store.Book.Preferences.DockEdge == "left" ? work.Left - rest.Width + 8 : work.Right - 8;
         Left = animated && SystemParameters.ClientAreaAnimation ? parked : rest.Left;
@@ -607,26 +854,34 @@ internal sealed class MainWindow : Window
             if (token != edgeMotionToken || dockHidden) return;
             BeginAnimation(LeftProperty, null);
             Left = rest.Left; edgeTransitioning = false; resizingMode = false; Fade();
+            Perf.Log($"edge reveal: done after {Perf.Ms(started)} ms");
         }
         if (!animated || !SystemParameters.ClientAreaAnimation) { Finish(); return; }
-        var slide = new DoubleAnimation(parked, rest.Left, TimeSpan.FromMilliseconds(280)) {
-            EasingFunction = new BackEase { Amplitude = .24, EasingMode = EasingMode.EaseOut }
+        var slide = new DoubleAnimation(parked, rest.Left, TimeSpan.FromMilliseconds(300)) {
+            EasingFunction = new SpringEase { EasingMode = EasingMode.EaseIn }
         };
         slide.Completed += (_, _) => Finish();
+        Perf.Frames("edge reveal", started, 300);
         BeginAnimation(LeftProperty, slide);
     }
     internal void HideToTray() { Hide(); edgeHandle.Hide(); }
+    internal bool EdgeHandleVisible => edgeHandle.IsVisible;
 }
 
 internal sealed class CaptureWindow : Window
 {
     private readonly App app;
-    private readonly DockPanel captureRoot = new() { Background = Brushes.Transparent, RenderTransformOrigin = new Point(.5, .5) };
+    // Alpha 1 instead of fully transparent: a layered window lets the mouse fall through alpha-0 pixels, which
+    // ended the hover in the gap before the close button. macOS treats the whole bar as hover area.
+    private readonly DockPanel captureRoot = new() { Background = new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)), RenderTransformOrigin = new Point(.5, .5) };
+    private int entrance;
     private readonly ScaleTransform captureScale = new(1, 1);
     private readonly ScaleTransform cancelScale = new(.72, .72);
     private readonly TextBox input = new() { FontSize = 20, BorderThickness = new Thickness(0), Padding = new Thickness(5), Background = Brushes.Transparent, VerticalAlignment = VerticalAlignment.Center };
     private readonly Border surface = new() { CornerRadius = new CornerRadius(32), Padding = new Thickness(22, 8, 22, 8), BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1) };
     private readonly Border cancelSurface = new() { CornerRadius = new CornerRadius(32), Width = 64, Height = 64, BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1), Margin = new Thickness(12, 0, 0, 0) };
+    private readonly TextBlock icon = UI.Glyph("", 22);
+    private readonly Button save;
     internal CaptureWindow(App app)
     {
         this.app = app;
@@ -634,16 +889,16 @@ internal sealed class CaptureWindow : Window
         WindowStyle = WindowStyle.None; AllowsTransparency = true; Background = Brushes.Transparent; Topmost = true; ShowInTaskbar = false;
         FontFamily = new FontFamily("Microsoft YaHei UI");
         var panel = new DockPanel();
-        var icon = UI.Text("✎", 25); icon.Margin = new Thickness(0, 0, 14, 0); icon.VerticalAlignment = VerticalAlignment.Center;
+        icon.Margin = new Thickness(0, 0, 15, 0);
         DockPanel.SetDock(icon, Dock.Left); panel.Children.Add(icon);
-        var save = UI.Button("↵", Save); DockPanel.SetDock(save, Dock.Right); panel.Children.Add(save);
+        save = UI.Icon("", "保存到 Inbox", Save, 14); DockPanel.SetDock(save, Dock.Right); panel.Children.Add(save);
         var inputArea = new Grid();
         inputArea.Children.Add(input);
         var placeholder = new TextBlock { Text = "记下此刻的想法…", FontSize = 20, Foreground = Brushes.Gray, Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
         inputArea.Children.Add(placeholder);
         input.TextChanged += (_, _) => placeholder.Visibility = input.Text.Length == 0 ? Visibility.Visible : Visibility.Hidden;
         panel.Children.Add(inputArea); surface.Child = panel;
-        var cancel = new Button { Content = "×", FontSize = 27, Background = Brushes.Transparent, BorderThickness = new Thickness(0), ToolTip = "取消输入 · Esc" };
+        var cancel = new Button { Content = UI.Glyph("", 18), Background = Brushes.Transparent, BorderThickness = new Thickness(0), ToolTip = "取消输入 · Esc", Cursor = Cursors.Hand, OverridesDefaultStyle = true };
         var cancelPresenter = new FrameworkElementFactory(typeof(ContentPresenter));
         cancelPresenter.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
         cancelPresenter.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
@@ -675,26 +930,63 @@ internal sealed class CaptureWindow : Window
             }
         };
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { app.CloseCapture(); e.Handled = true; } };
+        // Drag from anywhere on the bar, including the text box: a press that moves past the system drag
+        // threshold moves the window, while a plain click still places the caret.
+        Point? pressed = null;
+        var caret = 0;
+        PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            pressed = InsideButton(e.OriginalSource as DependencyObject) ? null : e.GetPosition(this);
+            caret = input.CaretIndex;
+        };
+        PreviewMouseLeftButtonUp += (_, _) => pressed = null;
+        PreviewMouseMove += (_, e) =>
+        {
+            if (pressed is not Point start || e.LeftButton != MouseButtonState.Pressed) return;
+            var moved = e.GetPosition(this) - start;
+            if (Math.Abs(moved.X) < SystemParameters.MinimumHorizontalDragDistance && Math.Abs(moved.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+            pressed = null;
+            Mouse.Capture(null);
+            DragMove();
+            // Undo any selection the text box began before the drag took over.
+            input.Select(caret, 0);
+            e.Handled = true;
+        };
         Deactivated += (_, _) => { if (IsVisible) app.CloseCapture(false); };
         Closing += (_, e) => { if (!app.Quitting) { e.Cancel = true; app.CloseCapture(); } };
     }
+    // Centre on the cursor's screen in physical pixels. The window may not have been shown yet, so WPF's
+    // device transform is not available; ask the monitor for its DPI instead.
     internal void PositionAtCursor()
     {
-        new WindowInteropHelper(this).EnsureHandle();
+        var hwnd = new WindowInteropHelper(this).EnsureHandle();
         Native.GetCursorPos(out var point);
         var work = Forms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y)).WorkingArea;
-        var transform = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
-        var center = transform.Transform(new Point(work.Left + work.Width / 2.0, work.Top + work.Height / 2.0));
-        Left = center.X - Width / 2; Top = center.Y - Height / 2;
+        var monitor = Native.MonitorFromPoint(point, 2);
+        var scale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : 1.0;
+        Width = Math.Min(660, work.Width / scale - 40);
+        var width = (int)Math.Round(Width * scale); var height = (int)Math.Round(Height * scale);
+        Native.SetWindowPos(hwnd, IntPtr.Zero, work.Left + (work.Width - width) / 2, work.Top + (work.Height - height) / 2, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        Perf.Log($"capture place: work {work}, dpi scale {scale:F2}, size {width}x{height}");
         ApplyAppearance();
+    }
+    [Conditional("PERF")]
+    internal void LogPlacement()
+    {
+        Native.GetWindowRect(new WindowInteropHelper(this).Handle, out var rect);
+        Perf.Log($"capture shown at {rect.Left},{rect.Top} to {rect.Right},{rect.Bottom}");
     }
     internal void ApplyAppearance()
     {
         var color = UI.ParseColor(app.Store.Book.Preferences.Background);
         surface.Background = new SolidColorBrush(color);
         cancelSurface.Background = surface.Background;
-        Foreground = color.R * .2126 + color.G * .7152 + color.B * .0722 < 115 ? Brushes.WhiteSmoke : Brushes.Black;
-        input.Foreground = Foreground;
+        var dark = color.R * .2126 + color.G * .7152 + color.B * .0722 < 115;
+        Foreground = dark ? Brushes.WhiteSmoke : Brushes.Black;
+        input.Foreground = Foreground; input.CaretBrush = Foreground;
+        icon.Foreground = save.Foreground = UI.Muted(Foreground);
+        surface.BorderBrush = cancelSurface.BorderBrush = new SolidColorBrush(dark ? Color.FromArgb(46, 255, 255, 255) : Color.FromArgb(36, 0, 0, 0));
+        save.ToolTip = app.Store.Book.Preferences.ControlEnterToSave ? "保存到 Inbox · Ctrl + Enter" : "保存到 Inbox · Enter";
         Opacity = Math.Clamp(app.Store.Book.Preferences.CaptureOpacity, .15, 1);
     }
     internal void PrepareEntrance()
@@ -707,29 +999,41 @@ internal sealed class CaptureWindow : Window
         captureScale.ScaleY = SystemParameters.ClientAreaAnimation ? .98 : 1;
         AnimateCancel(false);
     }
+    // Start the pop-in on the first rendered frame. Starting the clock before Show() let ~30 ms of the
+    // animation elapse off screen, so the bar seemed to appear without popping.
     internal void AnimateIn()
     {
         if (!SystemParameters.ClientAreaAnimation) return;
-        captureRoot.BeginAnimation(OpacityProperty, new DoubleAnimation(.75, 1, TimeSpan.FromMilliseconds(90)) {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        });
-        var spring = new BackEase { Amplitude = .15, EasingMode = EasingMode.EaseOut };
-        captureScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(.90, 1, TimeSpan.FromMilliseconds(120)) { EasingFunction = spring });
-        captureScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(.98, 1, TimeSpan.FromMilliseconds(120)) { EasingFunction = spring });
+        var token = ++entrance;
+        EventHandler? begin = null;
+        begin = (_, _) =>
+        {
+            CompositionTarget.Rendering -= begin;
+            if (token != entrance) return;
+            captureRoot.BeginAnimation(OpacityProperty, new DoubleAnimation(.75, 1, TimeSpan.FromMilliseconds(90)) {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
+            // SwiftUI .spring(response: 0.12, dampingFraction: 0.85) on the Mac.
+            var spring = new SpringEase(.12, .85, .25) { EasingMode = EasingMode.EaseIn };
+            captureScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(.90, 1, TimeSpan.FromMilliseconds(250)) { EasingFunction = spring });
+            captureScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(.98, 1, TimeSpan.FromMilliseconds(250)) { EasingFunction = spring });
+        };
+        CompositionTarget.Rendering += begin;
     }
+    // macOS fades the panel out (ease-in, 70 ms) without scaling it.
     internal void AnimateOut(Action completed)
     {
+        entrance++;
         if (!SystemParameters.ClientAreaAnimation) { completed(); return; }
         var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(70)) {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn }
         };
         fade.Completed += (_, _) => completed();
         captureRoot.BeginAnimation(OpacityProperty, fade);
-        captureScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(.98, TimeSpan.FromMilliseconds(70)));
-        captureScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(.98, TimeSpan.FromMilliseconds(70)));
     }
     private void AnimateCancel(bool visible)
     {
+        Perf.Log($"capture hover: close button {(visible ? "shown" : "hidden")}");
         cancelSurface.IsHitTestVisible = visible;
         var opacity = visible ? 1.0 : 0.0;
         var scale = visible ? 1.0 : .72;
@@ -737,12 +1041,18 @@ internal sealed class CaptureWindow : Window
         {
             cancelSurface.Opacity = opacity; cancelScale.ScaleX = cancelScale.ScaleY = scale; return;
         }
-        cancelSurface.BeginAnimation(OpacityProperty, new DoubleAnimation(opacity, TimeSpan.FromMilliseconds(160)) {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        });
-        var spring = new BackEase { Amplitude = .48, EasingMode = EasingMode.EaseOut };
-        cancelScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(scale, TimeSpan.FromMilliseconds(250)) { EasingFunction = spring });
-        cancelScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(scale, TimeSpan.FromMilliseconds(250)) { EasingFunction = spring });
+        // SwiftUI .spring(response: 0.30, dampingFraction: 0.60) drives both opacity and scale on the Mac.
+        var spring = new SpringEase(.30, .60, .45) { EasingMode = EasingMode.EaseIn };
+        var duration = TimeSpan.FromMilliseconds(450);
+        cancelSurface.BeginAnimation(OpacityProperty, new DoubleAnimation(opacity, duration) { EasingFunction = spring });
+        cancelScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(scale, duration) { EasingFunction = spring });
+        cancelScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(scale, duration) { EasingFunction = spring });
+    }
+    private static bool InsideButton(DependencyObject? element)
+    {
+        for (; element != null; element = element is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(element) : LogicalTreeHelper.GetParent(element))
+            if (element is System.Windows.Controls.Primitives.ButtonBase) return true;
+        return false;
     }
     internal void FocusInput() => Dispatcher.BeginInvoke(new Action(() => { if (IsVisible) input.Focus(); }), DispatcherPriority.Input);
     private void Save()
@@ -753,41 +1063,231 @@ internal sealed class CaptureWindow : Window
 
 internal sealed class SettingsWindow : Window
 {
+    private static readonly Brush Secondary = Frozen(Color.FromRgb(104, 104, 110));
+    private static readonly Brush Hairline = Frozen(Color.FromRgb(230, 230, 230));
+    private static readonly Brush Accent = Frozen(Color.FromRgb(77, 99, 84));
     private readonly App app;
-    private readonly StackPanel stack = new() { Margin = new Thickness(22) };
+    private readonly StackPanel stack = new() { Margin = new Thickness(20, 12, 20, 22) };
     private readonly StackPanel previews = new();
-    private readonly WrapPanel savedColors = new();
+    private readonly WrapPanel savedColors = new() { VerticalAlignment = VerticalAlignment.Center };
+    private Border? currentSwatch;
+    private TextBox? hexInput;
     internal void Refresh() => Render();
+    private static Brush Frozen(Color color) { var brush = new SolidColorBrush(color); brush.Freeze(); return brush; }
+
     internal SettingsWindow(App app)
     {
         this.app = app;
-        Title = "Aside 设置"; Width = 450; Height = 720; Topmost = true; ResizeMode = ResizeMode.NoResize;
+        Title = "Aside 设置"; Width = 460; Height = 720; Topmost = true; ResizeMode = ResizeMode.NoResize;
         ShowInTaskbar = false; WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        FontFamily = new FontFamily("Microsoft YaHei UI"); Background = Brushes.WhiteSmoke;
+        FontFamily = new FontFamily("Microsoft YaHei UI"); FontSize = 13;
+        Background = Frozen(Color.FromRgb(243, 243, 243)); Foreground = Frozen(Color.FromRgb(28, 28, 30));
         Content = new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         Render();
     }
+
     private void Render()
     {
         stack.Children.Clear(); var p = app.Store.Book.Preferences;
-        stack.Children.Add(UI.Text("通用", 18));
-        Toggle("窗口始终置顶", p.Topmost, value => app.Commit(b => b.Preferences.Topmost = value));
-        var pinCount = new DockPanel { Margin = new Thickness(3, 7, 3, 7) };
-        var count = new ComboBox { ItemsSource = Enumerable.Range(1, 20).ToArray(), SelectedItem = p.PinCapacity, Width = 65 };
-        count.SelectionChanged += (_, _) => app.Commit(b => b.Preferences.PinLimit = (int)count.SelectedItem);
-        DockPanel.SetDock(count, Dock.Right); pinCount.Children.Add(count);
-        pinCount.Children.Add(UI.Text("最多置顶条数")); stack.Children.Add(pinCount);
-        stack.Children.Add(UI.Text("调低数量不会移除已有置顶；可手动取消多余置顶。", 11));
+
+        var general = Card("通用");
+        AddRow(general, "窗口始终置顶", null, Switch(p.Topmost, value => app.Commit(b => b.Preferences.Topmost = value)));
+        AddRow(general, "最多置顶条数", "调低数量不会移除已有置顶；可手动取消多余置顶。",
+            Stepper(p.PinCapacity, 1, 20, value => app.Commit(b => b.Preferences.PinLimit = value)));
+        bool login;
         using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
-            Toggle("登录时启动 Aside", key?.GetValue("QuietPin") != null, SetLogin);
-        stack.Children.Add(UI.Text("全局快捷键"));
-        var shortcut = new Button { Content = p.CustomKeyLabel ?? App.ShortcutLabels[Math.Clamp(p.Shortcut, 0, 2)], Margin = new Thickness(3), Padding = new Thickness(9, 6, 9, 6) };
+            login = key?.GetValue("QuietPin") != null;
+        AddRow(general, "登录时启动 Aside", null, Switch(login, SetLogin));
+        AddRow(general, "全局快捷键", app.ShortcutError, ShortcutRecorder(), app.ShortcutError != null);
+        AddRow(general, "快速记录保存键", "快捷输入居中出现，保存后自动消失，新记录默认不置顶。",
+            Segmented(new[] { "Enter", "Ctrl + Enter" }, p.ControlEnterToSave ? 1 : 0,
+                index => app.Commit(b => b.Preferences.ControlEnterToSave = index == 1)));
+
+        var look = Card("外观");
+        currentSwatch = new Border { Width = 24, Height = 24, CornerRadius = new CornerRadius(6), BorderBrush = Frozen(Color.FromRgb(200, 200, 200)), BorderThickness = new Thickness(1) };
+        AddRow(look, "背景颜色", null, Inline(currentSwatch, UI.Pill("调色盘…", OpenColorDialog), UI.Pill("屏幕取色…", StartPicker)));
+        hexInput = new TextBox { Width = 112, Padding = new Thickness(6, 3, 6, 3), VerticalContentAlignment = VerticalAlignment.Center, BorderBrush = Frozen(Color.FromRgb(212, 212, 212)) };
+        AddRow(look, "颜色值", "#RRGGBB 或 #AARRGGBB", Inline(hexInput, UI.Pill("应用", ApplyHex)));
+        var shelf = new DockPanel();
+        var saveColor = UI.Pill("保存颜色", () => app.Commit(b =>
+        {
+            var color = UI.ParseColor(b.Preferences.Background).ToString();
+            if (!b.Preferences.SavedColors.Contains(color)) b.Preferences.SavedColors.Add(color);
+        }));
+        saveColor.VerticalAlignment = VerticalAlignment.Top; saveColor.Margin = new Thickness(0, 0, 12, 0);
+        DockPanel.SetDock(saveColor, Dock.Left); shelf.Children.Add(saveColor);
+        if (savedColors.Parent is Panel oldShelf) oldShelf.Children.Remove(savedColors);
+        shelf.Children.Add(savedColors);
+        AddBlock(look, "收藏色", shelf);
+        var idle = OpacityRow(look, "鼠标离开", p.IdleOpacity, value => app.Commit(b => b.Preferences.IdleOpacity = value));
+        idle.IsEnabled = p.Fade;
+        OpacityRow(look, "交互时", p.ActiveOpacity, value => app.Commit(b => b.Preferences.ActiveOpacity = value));
+        OpacityRow(look, "快速输入", p.CaptureOpacity, value => app.Commit(b => b.Preferences.CaptureOpacity = value));
+        AddRow(look, "鼠标离开时淡化", "关闭后，窗口固定使用「交互时」透明度。",
+            Switch(p.Fade, value => { idle.IsEnabled = value; app.Commit(b => b.Preferences.Fade = value); }));
+        if (previews.Parent is Panel oldPreviews) oldPreviews.Children.Remove(previews);
+        AddBlock(look, "实时预览", previews);
+        AddRow(look, "恢复默认外观", null, UI.Pill("恢复", () =>
+        {
+            app.Commit(b => { b.Preferences.Background = "#FFE8E6DB"; b.Preferences.IdleOpacity = .4; b.Preferences.ActiveOpacity = .95; b.Preferences.CaptureOpacity = .95; b.Preferences.Fade = true; });
+            Render();
+        }));
+        UpdatePreviews();
+
+        var about = Card("关于");
+        var info = new StackPanel { Margin = new Thickness(14, 12, 14, 12) };
+        info.Children.Add(new TextBlock { Text = "Aside · Capture it. Stay in flow.", FontWeight = FontWeights.SemiBold });
+        info.Children.Add(new TextBlock
+        {
+            Text = "记录仅保存在这台电脑上。拖动窗口空白处可移动，拖动边缘可调整大小；拖动置顶事项可调整顺序；右键可置顶、完成或删除。移动 exe 后，请重新开关登录启动以更新路径。",
+            FontSize = 11, Foreground = Secondary, TextWrapping = TextWrapping.Wrap, LineHeight = 17, Margin = new Thickness(0, 4, 0, 0)
+        });
+        about.Children.Add(info);
+        var githubContent = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 6) };
+        githubContent.Children.Add(new System.Windows.Controls.Image
+        {
+            Source = new BitmapImage(new Uri("pack://application:,,,/assets/GitHub_Invertocat_Black.png")),
+            Width = 22, Height = 22, HorizontalAlignment = HorizontalAlignment.Center
+        });
+        githubContent.Children.Add(new TextBlock { Text = "GitHub 项目主页 ↗", FontSize = 12, Foreground = Brushes.RoyalBlue, TextDecorations = TextDecorations.Underline, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 5, 0, 0) });
+        githubContent.Children.Add(new TextBlock { Text = "喜欢的话来点个⭐️支持作者吧，谢谢大家～", FontSize = 11, Foreground = Secondary, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) });
+        var github = UI.Flat(githubContent, "打开 Aside 的 GitHub 仓库", () =>
+        {
+            try { Process.Start(new ProcessStartInfo("https://github.com/savannahliz/aside") { UseShellExecute = true }); }
+            catch (Exception ex) { MessageBox.Show("无法打开 GitHub：" + ex.Message, "Aside"); }
+        }, 0, double.NaN);
+        github.HorizontalAlignment = HorizontalAlignment.Stretch; github.Margin = new Thickness(8, 4, 8, 8);
+        Separate(about); about.Children.Add(github);
+    }
+
+    private StackPanel Card(string title)
+    {
+        stack.Children.Add(new TextBlock { Text = title, FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = Secondary, Margin = new Thickness(4, stack.Children.Count == 0 ? 6 : 20, 0, 7) });
+        var rows = new StackPanel();
+        stack.Children.Add(new Border { Background = Brushes.White, BorderBrush = Hairline, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Child = rows });
+        return rows;
+    }
+    private static void Separate(StackPanel card)
+    {
+        if (card.Children.Count > 0) card.Children.Add(new Border { Height = 1, Background = Hairline, Margin = new Thickness(14, 0, 0, 0) });
+    }
+    private static void AddRow(StackPanel card, string label, string? caption, FrameworkElement control, bool warn = false)
+    {
+        Separate(card);
+        var row = new DockPanel { Margin = new Thickness(14, 10, 12, 10) };
+        control.VerticalAlignment = VerticalAlignment.Center; control.Margin = new Thickness(12, 0, 0, 0);
+        DockPanel.SetDock(control, Dock.Right); row.Children.Add(control);
+        var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        text.Children.Add(new TextBlock { Text = label, TextWrapping = TextWrapping.Wrap });
+        if (caption != null)
+            text.Children.Add(new TextBlock { Text = caption, FontSize = 11, Foreground = warn ? Brushes.Firebrick : Secondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) });
+        row.Children.Add(text); card.Children.Add(row);
+    }
+    private static void AddBlock(StackPanel card, string label, UIElement content)
+    {
+        Separate(card);
+        var block = new StackPanel { Margin = new Thickness(14, 10, 12, 12) };
+        block.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 0, 8) });
+        block.Children.Add(content); card.Children.Add(block);
+    }
+    private static StackPanel Inline(params FrameworkElement[] items)
+    {
+        var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        for (var i = 0; i < items.Length; i++)
+        {
+            items[i].VerticalAlignment = VerticalAlignment.Center;
+            if (i > 0) items[i].Margin = new Thickness(6, 0, 0, 0);
+            panel.Children.Add(items[i]);
+        }
+        return panel;
+    }
+    // Pill-shaped on/off switch in place of the bare WPF check box.
+    private static CheckBox Switch(bool value, Action<bool> change)
+    {
+        var track = new FrameworkElementFactory(typeof(Border), "track");
+        track.SetValue(FrameworkElement.WidthProperty, 40.0);
+        track.SetValue(FrameworkElement.HeightProperty, 22.0);
+        track.SetValue(Border.CornerRadiusProperty, new CornerRadius(11));
+        track.SetValue(Border.BackgroundProperty, Frozen(Color.FromRgb(200, 200, 200)));
+        var knob = new FrameworkElementFactory(typeof(System.Windows.Shapes.Ellipse), "knob");
+        knob.SetValue(FrameworkElement.WidthProperty, 16.0);
+        knob.SetValue(FrameworkElement.HeightProperty, 16.0);
+        knob.SetValue(System.Windows.Shapes.Shape.FillProperty, Brushes.White);
+        knob.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+        knob.SetValue(FrameworkElement.MarginProperty, new Thickness(3, 0, 3, 0));
+        track.AppendChild(knob);
+        var template = new ControlTemplate(typeof(CheckBox)) { VisualTree = track };
+        var on = new Trigger { Property = System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty, Value = true };
+        on.Setters.Add(new Setter(Border.BackgroundProperty, Accent, "track"));
+        on.Setters.Add(new Setter(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Right, "knob"));
+        template.Triggers.Add(on);
+        var disabled = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, .4));
+        template.Triggers.Add(disabled);
+        var toggle = new CheckBox { IsChecked = value, OverridesDefaultStyle = true, Template = template, Cursor = Cursors.Hand, Focusable = false };
+        toggle.Click += (_, _) => change(toggle.IsChecked == true);
+        return toggle;
+    }
+    private static FrameworkElement Stepper(int value, int min, int max, Action<int> change)
+    {
+        var current = value;
+        var label = new TextBlock { Text = value.ToString(), MinWidth = 26, TextAlignment = TextAlignment.Center, FontWeight = FontWeights.SemiBold };
+        Button minus = null!, plus = null!;
+        void Set(int next)
+        {
+            current = Math.Clamp(next, min, max); label.Text = current.ToString();
+            minus.IsEnabled = current > min; plus.IsEnabled = current < max;
+            change(current);
+        }
+        minus = UI.Pill("−", () => Set(current - 1)); plus = UI.Pill("+", () => Set(current + 1));
+        minus.IsEnabled = current > min; plus.IsEnabled = current < max;
+        return Inline(minus, label, plus);
+    }
+    private static FrameworkElement Segmented(string[] options, int selected, Action<int> change)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var track = new Border { Background = Frozen(Color.FromRgb(232, 232, 232)), CornerRadius = new CornerRadius(7), Padding = new Thickness(2), Child = row };
+        var segments = new Border[options.Length];
+        void Paint() { for (var i = 0; i < segments.Length; i++) segments[i].Background = i == selected ? Brushes.White : Brushes.Transparent; }
+        for (var i = 0; i < options.Length; i++)
+        {
+            var index = i;
+            var segment = new Border { CornerRadius = new CornerRadius(5), Padding = new Thickness(10, 3, 10, 4), Cursor = Cursors.Hand, Child = new TextBlock { Text = options[i], FontSize = 12 } };
+            segment.MouseLeftButtonUp += (_, _) => { if (selected == index) return; selected = index; Paint(); change(index); };
+            System.Windows.Automation.AutomationProperties.SetName(segment, options[i]);
+            segments[i] = segment; row.Children.Add(segment);
+        }
+        Paint();
+        return track;
+    }
+    private Slider OpacityRow(StackPanel card, string title, double value, Action<double> change)
+    {
+        Separate(card);
+        var row = new DockPanel { Margin = new Thickness(14, 8, 12, 8) };
+        var percent = new TextBlock { Text = $"{value:P0}", Width = 44, TextAlignment = TextAlignment.Right, Foreground = Secondary, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(percent, Dock.Right); row.Children.Add(percent);
+        var label = new TextBlock { Text = title, Width = 76, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(label, Dock.Left); row.Children.Add(label);
+        var slider = new Slider { Minimum = .15, Maximum = 1, Value = Math.Clamp(value, .15, 1), VerticalAlignment = VerticalAlignment.Center, IsMoveToPointEnabled = true };
+        slider.ValueChanged += (_, _) => { percent.Text = $"{slider.Value:P0}"; change(slider.Value); };
+        row.Children.Add(slider); card.Children.Add(row);
+        return slider;
+    }
+    private Button ShortcutRecorder()
+    {
+        string Current()
+        {
+            var q = app.Store.Book.Preferences;
+            return q.CustomKeyLabel ?? App.ShortcutLabels[Math.Clamp(q.Shortcut, 0, 2)];
+        }
+        var shortcut = UI.Pill(Current(), () => { });
+        shortcut.Focusable = true; shortcut.MinWidth = 150;
         var recording = false;
         void FinishRecording()
         {
             if (!recording) return;
             recording = false;
-            shortcut.Content = app.Store.Book.Preferences.CustomKeyLabel ?? App.ShortcutLabels[Math.Clamp(app.Store.Book.Preferences.Shortcut, 0, 2)];
+            shortcut.Content = Current();
             app.RegisterShortcut();
         }
         shortcut.Click += (_, _) =>
@@ -816,97 +1316,49 @@ internal sealed class SettingsWindow : Window
         };
         shortcut.LostKeyboardFocus += (_, _) => FinishRecording();
         Closed += (_, _) => FinishRecording();
-        stack.Children.Add(shortcut);
-        stack.Children.Add(UI.Text("快速记录保存键"));
-        var submit = new ComboBox { ItemsSource = new[] { "Enter", "Ctrl + Enter" }, SelectedIndex = p.ControlEnterToSave ? 1 : 0, Margin = new Thickness(3, 3, 3, 12) };
-        submit.SelectionChanged += (_, _) => app.Commit(b => b.Preferences.ControlEnterToSave = submit.SelectedIndex == 1);
-        stack.Children.Add(submit);
-        stack.Children.Add(UI.Text("外观", 18));
-        stack.Children.Add(UI.Button("背景颜色 · 系统调色盘", () =>
-        {
-            var color = UI.ParseColor(app.Store.Book.Preferences.Background);
-            using var dialog = new Forms.ColorDialog { FullOpen = true, Color = System.Drawing.Color.FromArgb(color.R, color.G, color.B) };
-            if (dialog.ShowDialog() == Forms.DialogResult.OK)
-                app.Commit(b => b.Preferences.Background = $"#FF{dialog.Color.R:X2}{dialog.Color.G:X2}{dialog.Color.B:X2}");
-        }));
-        stack.Children.Add(UI.Button("从屏幕取色…", StartPicker));
-        stack.Children.Add(UI.Text("也可输入颜色值（#RRGGBB 或 #AARRGGBB）：", 11));
-        var hex = new TextBox { Text = p.Background, Margin = new Thickness(3), Padding = new Thickness(5) };
-        stack.Children.Add(hex);
-        stack.Children.Add(UI.Button("应用颜色值", () =>
-        {
-            try { var color = (Color)ColorConverter.ConvertFromString(hex.Text); app.Commit(b => b.Preferences.Background = color.ToString()); }
-            catch { MessageBox.Show("请输入有效的颜色值，例如 #FFE8E6DB。", "Aside"); }
-        }));
-        var palette = new DockPanel { Margin = new Thickness(0, 8, 0, 8) };
-        var saveColor = UI.Button("保存颜色", () => app.Commit(b =>
-        {
-            var color = UI.ParseColor(b.Preferences.Background).ToString();
-            if (!b.Preferences.SavedColors.Contains(color)) b.Preferences.SavedColors.Add(color);
-        }));
-        DockPanel.SetDock(saveColor, Dock.Left);
-        palette.Children.Add(saveColor);
-        if (savedColors.Parent is ScrollViewer previousPalette) previousPalette.Content = null;
-        palette.Children.Add(new ScrollViewer { Content = savedColors, Height = 90, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        stack.Children.Add(palette);
-        Slider("鼠标离开", p.IdleOpacity, value => app.Commit(b => b.Preferences.IdleOpacity = value));
-        Slider("交互时", p.ActiveOpacity, value => app.Commit(b => b.Preferences.ActiveOpacity = value));
-        Slider("快速输入", p.CaptureOpacity, value => app.Commit(b => b.Preferences.CaptureOpacity = value));
-        Toggle("鼠标离开时淡化", p.Fade, value => app.Commit(b => b.Preferences.Fade = value));
-        UpdatePreviews();
-        stack.Children.Add(previews);
-        stack.Children.Add(UI.Button("恢复默认外观", () =>
-        {
-            app.Commit(b => { b.Preferences.Background = "#FFE8E6DB"; b.Preferences.IdleOpacity = .4; b.Preferences.ActiveOpacity = .95; b.Preferences.CaptureOpacity = .95; b.Preferences.Fade = true; }); Render();
-        }));
-        stack.Children.Add(UI.Text("数据仅保存在这台电脑。移动 exe 后，请重新开关登录启动以更新路径。", 11));
-        var github = new Button { Background = Brushes.Transparent, BorderThickness = new Thickness(0), Cursor = Cursors.Hand, Margin = new Thickness(3, 16, 3, 4) };
-        github.Content = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
-        var githubContent = (StackPanel)github.Content;
-        githubContent.Children.Add(new System.Windows.Controls.Image {
-            Source = new BitmapImage(new Uri("pack://application:,,,/assets/GitHub_Invertocat_Black.png")),
-            Width = 22, Height = 22, HorizontalAlignment = HorizontalAlignment.Center
-        });
-        var githubLabel = UI.Text("GitHub 项目主页 ↗", 12);
-        githubLabel.Foreground = Brushes.RoyalBlue;
-        githubLabel.TextDecorations = TextDecorations.Underline;
-        githubLabel.HorizontalAlignment = HorizontalAlignment.Center;
-        githubLabel.Margin = new Thickness(0, 5, 0, 0);
-        githubContent.Children.Add(githubLabel);
-        var support = UI.Text("喜欢的话来点个⭐️支持作者吧，谢谢大家～", 11);
-        support.HorizontalAlignment = HorizontalAlignment.Center;
-        support.Margin = new Thickness(0, 5, 0, 0);
-        githubContent.Children.Add(support);
-        github.Click += (_, _) => {
-            try { Process.Start(new ProcessStartInfo("https://github.com/savannahliz/aside") { UseShellExecute = true }); }
-            catch (Exception ex) { MessageBox.Show("无法打开 GitHub：" + ex.Message, "Aside"); }
-        };
-        System.Windows.Automation.AutomationProperties.SetName(github, "打开 Aside 的 GitHub 仓库");
-        stack.Children.Add(github);
+        System.Windows.Automation.AutomationProperties.SetName(shortcut, "录制自定义快捷键");
+        return shortcut;
     }
-    private void Toggle(string title, bool value, Action<bool> change)
+    private void OpenColorDialog()
     {
-        var toggle = new CheckBox { Content = title, IsChecked = value, Margin = new Thickness(3, 7, 3, 7) };
-        toggle.Click += (_, _) => change(toggle.IsChecked == true); stack.Children.Add(toggle);
+        var color = UI.ParseColor(app.Store.Book.Preferences.Background);
+        using var dialog = new Forms.ColorDialog { FullOpen = true, Color = System.Drawing.Color.FromArgb(color.R, color.G, color.B) };
+        if (dialog.ShowDialog() == Forms.DialogResult.OK)
+            app.Commit(b => b.Preferences.Background = $"#FF{dialog.Color.R:X2}{dialog.Color.G:X2}{dialog.Color.B:X2}");
+    }
+    private void ApplyHex()
+    {
+        try { var color = (Color)ColorConverter.ConvertFromString(hexInput?.Text ?? ""); app.Commit(b => b.Preferences.Background = color.ToString()); }
+        catch { MessageBox.Show("请输入有效的颜色值，例如 #FFE8E6DB。", "Aside"); }
     }
     internal void UpdatePreviews()
     {
+        var p = app.Store.Book.Preferences;
+        var current = UI.ParseColor(p.Background);
+        if (currentSwatch != null) currentSwatch.Background = new SolidColorBrush(current);
+        if (hexInput != null && !hexInput.IsKeyboardFocusWithin) hexInput.Text = p.Background;
         savedColors.Children.Clear();
-        foreach (var color in app.Store.Book.Preferences.SavedColors)
+        foreach (var color in p.SavedColors)
         {
-            var swatch = new Button { Width = 28, Height = 28, Margin = new Thickness(3), Background = new SolidColorBrush(UI.ParseColor(color)), ToolTip = color + " · 右键删除" };
+            var selected = UI.ParseColor(color) == current;
+            var swatch = new Border
+            {
+                Width = 26, Height = 26, Margin = new Thickness(0, 0, 6, 6), CornerRadius = new CornerRadius(5),
+                Background = new SolidColorBrush(UI.ParseColor(color)), Cursor = Cursors.Hand,
+                BorderBrush = selected ? Accent : Frozen(Color.FromRgb(190, 190, 190)), BorderThickness = new Thickness(selected ? 2 : 1),
+                ToolTip = $"使用 {color} · 右键删除"
+            };
             System.Windows.Automation.AutomationProperties.SetName(swatch, "收藏颜色 " + color);
-            swatch.Click += (_, _) => app.Commit(b => b.Preferences.Background = color);
+            swatch.MouseLeftButtonUp += (_, _) => app.Commit(b => b.Preferences.Background = color);
             var menu = new ContextMenu();
             var remove = new MenuItem { Header = "删除保存的颜色" };
             remove.Click += (_, _) => app.Commit(b => b.Preferences.SavedColors.Remove(color));
             menu.Items.Add(remove); swatch.ContextMenu = menu;
             savedColors.Children.Add(swatch);
         }
-        if (savedColors.Children.Count == 0) savedColors.Children.Add(UI.Text("保存后显示在这里\n点击使用 · 右键删除", 11));
+        if (savedColors.Children.Count == 0)
+            savedColors.Children.Add(new TextBlock { Text = "保存后显示在这里\n点击使用 · 右键删除", FontSize = 11, Foreground = Secondary, LineHeight = 16 });
         previews.Children.Clear();
-        var p = app.Store.Book.Preferences;
-        previews.Children.Add(UI.Text("实时预览", 13));
         var notes = new Grid();
         notes.ColumnDefinitions.Add(new ColumnDefinition()); notes.ColumnDefinitions.Add(new ColumnDefinition());
         var idle = PreviewCard("便签 · 闲置", p.Fade ? p.IdleOpacity : p.ActiveOpacity, false);
@@ -917,32 +1369,30 @@ internal sealed class SettingsWindow : Window
     }
     private FrameworkElement PreviewCard(string label, double opacity, bool capturePreview)
     {
-        var column = new StackPanel { Margin = new Thickness(3) };
-        column.Children.Add(UI.Text($"{label}  {opacity:P0}", 11));
+        var column = new StackPanel { Margin = new Thickness(0, 0, capturePreview ? 0 : 6, 8) };
+        column.Children.Add(new TextBlock { Text = $"{label}  {opacity:P0}", FontSize = 11, Foreground = Secondary, Margin = new Thickness(0, 0, 0, 5) });
         var tiles = new DrawingGroup();
         tiles.Children.Add(new GeometryDrawing(Brushes.Gainsboro, null, new RectangleGeometry(new Rect(0, 0, 16, 16))));
         tiles.Children.Add(new GeometryDrawing(Brushes.WhiteSmoke, null, new RectangleGeometry(new Rect(0, 0, 8, 8))));
         tiles.Children.Add(new GeometryDrawing(Brushes.WhiteSmoke, null, new RectangleGeometry(new Rect(8, 8, 8, 8))));
-        var board = new Grid { Height = capturePreview ? 58 : 76, Background = new DrawingBrush(tiles) { TileMode = TileMode.Tile, Viewport = new Rect(0, 0, 16, 16), ViewportUnits = BrushMappingMode.Absolute } };
+        var board = new Border
+        {
+            Height = capturePreview ? 56 : 70, CornerRadius = new CornerRadius(8), ClipToBounds = true,
+            Background = new DrawingBrush(tiles) { TileMode = TileMode.Tile, Viewport = new Rect(0, 0, 16, 16), ViewportUnits = BrushMappingMode.Absolute }
+        };
         var color = UI.ParseColor(app.Store.Book.Preferences.Background);
         var foreground = color.R * .2126 + color.G * .7152 + color.B * .0722 < 115 ? Brushes.WhiteSmoke : Brushes.Black;
         var body = new DockPanel { Margin = new Thickness(8), Opacity = opacity };
         if (capturePreview)
         {
-            var cancel = new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(18), Margin = new Thickness(6, 0, 0, 0), Background = new SolidColorBrush(color), Child = new TextBlock { Text = "×", FontSize = 18, Foreground = foreground, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center } };
+            var cancel = new Border { Width = 36, Height = 36, CornerRadius = new CornerRadius(18), Margin = new Thickness(6, 0, 0, 0), Background = new SolidColorBrush(color) };
+            var cancelGlyph = UI.Glyph("", 11); cancelGlyph.Foreground = foreground; cancel.Child = cancelGlyph;
             DockPanel.SetDock(cancel, Dock.Right); body.Children.Add(cancel);
         }
-        var text = new TextBlock { Text = capturePreview ? "✎  记下此刻的想法…" : "Inbox\n○ 一件要记住的事", FontSize = 11, Foreground = foreground, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 10, 0) };
-        body.Children.Add(new Border { CornerRadius = new CornerRadius(capturePreview ? 20 : 8), Background = new SolidColorBrush(color), Child = text });
-        board.Children.Add(body); column.Children.Add(board);
+        var text = new TextBlock { Text = capturePreview ? "记下此刻的想法…" : "Inbox\n一件要记住的事", FontSize = 11, Foreground = foreground, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 10, 0) };
+        body.Children.Add(new Border { CornerRadius = new CornerRadius(capturePreview ? 18 : 9), Background = new SolidColorBrush(color), Child = text });
+        board.Child = body; column.Children.Add(board);
         return column;
-    }
-    private void Slider(string title, double value, Action<double> change)
-    {
-        var label = UI.Text($"{title}  {value:P0}"); stack.Children.Add(label);
-        var slider = new Slider { Minimum = .15, Maximum = 1, Value = Math.Clamp(value, .15, 1), Margin = new Thickness(3), TickFrequency = .05 };
-        slider.ValueChanged += (_, _) => { label.Text = $"{title}  {slider.Value:P0}"; change(slider.Value); };
-        stack.Children.Add(slider);
     }
     private void SetLogin(bool enabled)
     {
